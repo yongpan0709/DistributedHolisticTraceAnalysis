@@ -6,10 +6,10 @@ from typing import Dict, Optional
 import pandas as pd
 
 from hta.common.trace_filter import NameFilter
-from musa_examples.utils.trace_filter_utils import create_regex_for_prefix_match
+from megatron_parallel_analysis.utils.trace_filter_utils import create_regex_for_prefix_match
 from hta.configs.config import logger
 from hta.configs.default_values import DEFAULT_TRACE_DIR
-from musa_examples.megatron_pipeline_group.megatron_pipeline_group_base import MegatronPipelineParallelGroupTraceBase
+from megatron_parallel_analysis.megatron_pipeline_group_base import MegatronPipelineParallelGroupTraceBase
 
 
 class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceBase):

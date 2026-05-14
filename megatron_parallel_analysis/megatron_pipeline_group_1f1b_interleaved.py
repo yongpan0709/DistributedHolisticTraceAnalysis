@@ -8,10 +8,10 @@ import pandas as pd
 from hta.common.trace_filter import NameFilter
 from hta.configs.config import logger
 from hta.configs.default_values import DEFAULT_TRACE_DIR
-from musa_examples.megatron_pipeline_group.megatron_pipeline_group_base import MegatronPipelineParallelGroupTraceBase
-from musa_examples.utils.parallel_state import get_pp_rank_microbatches
-from musa_examples.utils.pipeline_parallel_utils import convert_schedule_table_to_order, get_schedule_table
-from musa_examples.utils.trace_filter_utils import create_regex_for_full_match
+from megatron_parallel_analysis.megatron_pipeline_group_base import MegatronPipelineParallelGroupTraceBase
+from megatron_parallel_analysis.utils.parallel_state import get_pp_rank_microbatches
+from megatron_parallel_analysis.utils.pipeline_parallel_utils import convert_schedule_table_to_order, get_schedule_table
+from megatron_parallel_analysis.utils.trace_filter_utils import create_regex_for_full_match
 
 class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallelGroupTraceBase):
     """1F1B interleaved (One-Forward-One-Backward) 调度下的 PP group trace 分析。"""

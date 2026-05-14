@@ -13,13 +13,13 @@ import pandas as pd
 
 from hta.common.trace import Trace
 from hta.common.trace_filter import NameFilter
-from musa_examples.utils.trace_filter_utils import create_regex_for_prefix_match
+from megatron_parallel_analysis.utils.trace_filter_utils import create_regex_for_prefix_match
 from hta.configs.config import logger
 from hta.configs.default_values import DEFAULT_TRACE_DIR
 from hta.common.trace_call_graph import CallGraph
 from hta.common.trace_file import get_trace_files
-from musa_examples.utils.parallel_state import RankGenerator
-from musa_examples.utils.call_graph_utils import get_main_stack_on_rank
+from megatron_parallel_analysis.utils.parallel_state import RankGenerator
+from megatron_parallel_analysis.utils.call_graph_utils import get_main_stack_on_rank
 
 
 def parallel_callgraph_create(rank_id, trace_file):
