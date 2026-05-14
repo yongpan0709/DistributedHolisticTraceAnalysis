@@ -11,7 +11,7 @@ from hta.common.trace_call_graph import CallGraph
 from hta.common.trace_file import get_trace_files
 from hta.configs.parser_config import ParserConfig
 
-from musa_examples.call_graph_template import (
+from pytorch_callstack_analysis.call_graph_template import (
     extract_dup_or_shape_func_name_from_template,
     extract_func_name_from_template,
     output_template_to_file,
@@ -20,9 +20,9 @@ from musa_examples.call_graph_template import (
     output_template_to_file_kimi_epoverlap,
     set_pandas_display_options,
 )
-from musa_examples.utils.musa_fwdbwd_util import get_backward_duration, get_forward_duration_dup, get_forward_duration_uniq
-from musa_examples.utils import time_it
-from musa_examples.utils.call_graph_utils import get_main_stack_on_rank
+from pytorch_callstack_analysis.utils.musa_fwdbwd_util import get_backward_duration, get_forward_duration_dup, get_forward_duration_uniq
+from pytorch_callstack_analysis.utils.timing import time_it
+from megatron_parallel_analysis.utils.call_graph_utils import get_main_stack_on_rank
 
 TEMPLATE_MAP = {
     "default": output_template_to_file,
