@@ -12,8 +12,8 @@ from typing import Any, Dict
 
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'musa_examples'))
-from megatron_pipeline_group.distribute_trace_analysis import DistributedMegatronTraceAnalysis
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from megatron_parallel_analysis.distribute_trace_analysis import DistributedMegatronTraceAnalysis
 
 from hta.utils.test_utils import get_test_data_dir
 from tests.data.musa_megatron_trace.dataset_config import (

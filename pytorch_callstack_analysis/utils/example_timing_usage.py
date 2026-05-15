@@ -1,13 +1,13 @@
 """计时工具使用示例
 
-该文件展示了如何使用 musa_examples/utils/timing.py 中的计时工具。
+该文件展示了如何使用 pytorch_callstack_analysis/utils/timing.py 中的计时工具。
 
 运行方式:
     python example_timing_usage.py
 """
 
 import time
-from musa_examples.utils.timing import (
+from pytorch_callstack_analysis.utils.timing import (
     TimingTracker,
     get_timer,
     reset_timer,
