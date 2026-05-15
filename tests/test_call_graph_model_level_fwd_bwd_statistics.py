@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 
 # Add musa_examples to path for imports
-musa_examples_path = Path(__file__).parent.parent.joinpath("musa_examples")
+musa_examples_path = Path(__file__).parent
 sys.path.insert(0, str(musa_examples_path))
 
-from call_graph_model_level_fwd_bwd_statistics import TEMPLATE_MAP, analyze_rank
+from pytorch_callstack_analysis.call_graph_model_level_fwd_bwd_statistics import TEMPLATE_MAP, analyze_rank
 from hta.common.trace_file import get_trace_files
 from tests.data.musa_megatron_trace.dataset_config import (
     MODEL_MAIN_STACK_TEST_DATASET,
