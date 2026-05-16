@@ -1,7 +1,5 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 """
-Test cases for call_graph_model_level_fwd_bwd_statistics.py
-
+Test cases for model_level_fwdbwd_statistics.py
 This module tests the model-level forward/backward statistics analysis functionality.
 """
 import os
@@ -14,7 +12,7 @@ from pathlib import Path
 musa_examples_path = Path(__file__).parent
 sys.path.insert(0, str(musa_examples_path))
 
-from pytorch_callstack_analysis.call_graph_model_level_fwd_bwd_statistics import TEMPLATE_MAP, analyze_rank
+from pytorch_callstack_analysis.model_level_fwdbwd_statistics import TEMPLATE_MAP, analyze_rank
 from hta.common.trace_file import get_trace_files
 from tests.data.musa_megatron_trace.dataset_config import (
     MODEL_MAIN_STACK_TEST_DATASET,

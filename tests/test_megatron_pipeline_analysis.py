@@ -1,5 +1,5 @@
 """
-Test cases for parse_megatron.py with different PP_SCHEDULE configurations.
+Test cases for DistributedMegatronTraceAnalysis with different PP_SCHEDULE configurations.
 
 This module verifies that DistributedMegatronTraceAnalysis produces the
 expected report CSV for supported pipeline parallel schedules.
