@@ -8,12 +8,16 @@ This directory only contains Megatron distributed and pipeline-specific analysis
 
 ## Capabilities
 
-- **Distribute analysis by PP group**: generate Megatron-style rank groups from TP / CP / EP / DP / PP settings and partition rank traces under `workspace/<trace-name>/trace/pp_group_<id>/`.
+- **Distribute analysis by PP group**: generate Megatron-style rank groups from TP / CP / EP / DP / PP settings and symlink or group rank traces under `workspace/<trace-name>/trace/pp_group_<id>/`.
 - **MPI multi-process execution**: each MPI process handles a subset of PP groups, reducing the memory and parsing pressure of very large traces.
 - **Pipeline schedule analysis**: supports `1f1b`, `1f1b-interleaved`, and `1f1b-interleaved-epoverlap`.
 - **Per-PP-group processing**: builds HTA `Trace` / `CallGraph` objects, extracts communication-related spans, assigns micro batch IDs, and links P2P send / recv events between adjacent stages.
 - **Report and trace export**: writes `report-pp<id>.csv` and `pp<id>-trace.json` for each PP group to inspect stage wait time, bubbles, communication, and workload imbalance.
 - **Cluster-level aggregation hooks**: keeps MPI gather and anomaly-detection logic that can be enabled for PP-group and layer-level straggler analysis.
+
+- **Abnormal node / GPU / operator detection**:
+  - Compare latency differences across layers on the same rank to locate operators with unstable execution time.
+  - Compare latency differences across ranks at the same time to locate spatial instability across machines or GPUs.
 
 ## Layout
 
@@ -31,6 +35,30 @@ megatron_parallel_analysis/
     ├── pipeline_parallel_utils.py
     ├── trace_filter_utils.py
     └── utils.py
+```
+
+## Typical workflow
+
+```bash
+# 1. Get the code
+git clone -b v0.6.1-musa0.0.1 https://sh-code.mthreads.com/ai/HolisticTraceAnalysis
+cd HolisticTraceAnalysis
+
+# If you need a specific branch, run git checkout for the actual development branch.
+
+# Single-node installation
+pip install -r requirements.txt
+pip install -e .
+
+# Build a wheel
+pip wheel . --wheel-dir=dist/ --no-deps --use-pep517 --no-build-isolation
+
+# Or install the wheel directly
+pip install traceinsight-*-py3-none-any.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Multi-node installation, useful when analyzing traces from 1000 GPUs or larger scales in parallel
+cd musa_examples/
+bash install_hta.sh <HolisticTraceAnalysis_Path>  # requires hostfile
 ```
 
 ## Core modules

@@ -15,6 +15,10 @@
 - **报告与 trace 导出**：为每个 PP group 输出 `report-pp<id>.csv` 和 `pp<id>-trace.json`，用于观察 stage 等待、bubble、通信和负载差异。
 - **集群级聚合能力**：保留跨 MPI rank 聚合与异常检测逻辑，可进一步启用 PP group 间、layer 间的 straggler 分析。
 
+- **异常节点/GPU/算子检测**
+   - 比较同一 rank 上不同 layer 之间的耗时差异，定位时间不稳定的算子。
+   - 比较同一时间不同 rank 之间的耗时差异，定位跨机器或跨卡的空间不稳定性。
+
 ## 目录结构
 
 ```text
@@ -31,6 +35,30 @@ megatron_parallel_analysis/
     ├── pipeline_parallel_utils.py
     ├── trace_filter_utils.py
     └── utils.py
+```
+
+## 典型工作流
+
+```bash
+# 1. 获取代码
+git clone -b v0.6.1-musa0.0.1 https://sh-code.mthreads.com/ai/HolisticTraceAnalysis
+cd HolisticTraceAnalysis
+
+# 如需切换到特定分支，请按实际开发分支执行 git checkout
+
+# 安装单机
+pip install -r requirements.txt
+pip install -e .
+
+# 构建wheel
+pip wheel . --wheel-dir=dist/ --no-deps --use-pep517 --no-build-isolation
+
+# 或直接安装whl
+pip install traceinsight-*-py3-none-any.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 安装多机(当1000卡甚至更大规模的trace需要分析时，可以支持多机并行分析)
+cd musa_examples/
+bash install_hta.sh <HolisticTraceAnalysis_Path>  # 需要hostfile
+
 ```
 
 ## 核心模块
