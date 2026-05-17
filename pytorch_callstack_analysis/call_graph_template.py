@@ -48,6 +48,48 @@ SHAPE_TO_VOLUME_FUNC = {
     "nn.Module: RMSNorm_\d+": "RMSNorm forward",
 }
 
+SHAPE_POSITION_FWD_BWD = {
+    r"transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_grouped_gemm": {
+        "type": "TFLOPS",
+        "ShapeFrom": r"_GroupedLinear",
+        "formula": calculate_groupedlinear_tflops_or_bw,
+    },
+    r"transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm": {
+        "type": "TFLOPS",
+        "ShapeFrom": r"(_Linear|_LayerNormLinear|RouterGatingLinearFunction)",
+        "formula": calculate_linear_tflops_or_bw,
+    },
+    r"LinearWithGradAccumulationAndAsyncCommunication": {
+        "type": "TFLOPS",
+        "ShapeFrom": r"LinearWithGradAccumulationAndAsyncCommunication",
+        "formula": calculate_linear_tflops_or_bw,
+    },
+    r"INVALID": {
+        "type": "TFLOPS",
+        "ShapeFrom": r"LinearWithGradAccumulationAndAsyncCommunication",
+        "formula": calculate_linear_tflops_or_bw,
+    },
+    r"transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize": {
+        "type": "GB/s",
+        "ShapeFrom": r"(_Linear|_LayerNormLinear|RouterGatingLinearFunction)",
+        "formula": calculate_linear_tflops_or_bw,
+    },
+    r"<built-in method fused_multi_quantize of PyCapsule object at 0x[0-9a-fA-F]+>": {
+        "type": "GB/s",
+        "ShapeFrom": r"_GroupedLinear",
+        "formula": calculate_groupedlinear_tflops_or_bw,
+    },
+}
+
+SHAPE_POSITION_FWD_BWD_OF_FLASH_ATTENTION = {
+    r"aten::_scaled_dot_product_attention_flash_musa": {
+        "type": "TFLOPS",
+        "ShapeFrom": r"aten::_scaled_dot_product_attention_flash_musa",
+        "bwd_func": r"aten::_scaled_dot_product_attention_flash_musa_backward",
+        "formula": calculate_scaled_dot_product_attention_flash_musa_flops,
+    }
+}
+
 output_template_to_file = r"""
 pretrain_deepseekv2.py\(\d+\): forward_step
     pretrain_deepseekv2.py\(\d+\): get_batch
@@ -220,6 +262,62 @@ pretrain_kimi.py\(\d+\): <module>
         megatron/core/pipeline_parallel/p2p_communication.py\(\d+\): send_backward
         megatron/core/pipeline_parallel/p2p_communication.py\(\d+\): recv_forward
         megatron/core/pipeline_parallel/p2p_communication.py\(\d+\): recv_backward
+"""
+
+# In template, funcs with @shape@ label for extracting shape info
+# its first parent node is also the entry link to backward func node
+# One kernel in forward will generate two backward kernels
+kernel_level_template = r"""
+nn.Module: MLASelfAttention_0
+    nn.Module: TELinear_0
+        _Linear @dup@
+            transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+            transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+    nn.Module: TELinear_1
+        _Linear @dup@
+            transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+            transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+    nn.Module: TELayerNormColumnParallelLinear_0
+        _LayerNormLinear @dup@
+            transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+            transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+    nn.Module: TELayerNormColumnParallelLinear_1
+        _LayerNormLinear @dup@
+            transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+            transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+    nn.Module: TEDotProductAttention_0
+        nn.Module: FlashAttention_0
+            aten::_scaled_dot_product_attention_flash_musa @shape@
+    nn.Module: TERowParallelLinear_0
+        _Linear @dup@
+            transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+            transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+nn.Module: MoELayer_0
+    nn.Module: TopKRouter_0
+        RouterGatingLinearFunction
+            transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+    nn.Module: SharedExpertMLP_0
+        nn.Module: TEColumnParallelLinear_0 
+            _Linear @dup@
+                transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+                transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+        nn.Module: TERowParallelLinear_1
+            _Linear @dup@
+                transformer_engine/pytorch/tensor/quantized_tensor.py\(\d+\): quantize @dup@ @shape@
+                transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm @dup@ @shape@
+    nn.Module: TEGroupedMLP_0
+        nn.Module: TEColumnParallelGroupedLinear_0
+            _GroupedLinear @dup@
+                <built-in method fused_multi_quantize of PyCapsule object at 0x[0-9a-fA-F]+> @dup@ @shape@
+                transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_grouped_gemm @dup@ @shape@
+        nn.Module: TERowParallelGroupedLinear_0
+            _GroupedLinear @dup@
+                <built-in method fused_multi_quantize of PyCapsule object at 0x[0-9a-fA-F]+> @dup@ @shape@
+                transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_grouped_gemm @dup@ @shape@
+megatron/core/models/gpt/gpt_model.py\(\d+\): _postprocess
+    nn.Module: ColumnParallelLinear_0 @dup@
+        LinearWithGradAccumulationAndAsyncCommunication
+            INVALID @dup@ @shape@
 """
 
 # Function to count leading spaces or tabs
