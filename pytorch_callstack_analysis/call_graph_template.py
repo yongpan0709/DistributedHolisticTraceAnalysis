@@ -1,52 +1,11 @@
 from collections import defaultdict
 from typing import Dict, List, Set
 import pandas as pd
-from pytorch_callstack_analysis.utils.musa_basic_kernel_info import calculate_CheckpointWithoutOutputFunction, calculate_groupedlinear_tflops_or_bw, calculate_linear_tflops_or_bw, calculate_scaled_dot_product_attention_flash_musa_flops
+from pytorch_callstack_analysis.utils.musa_basic_kernel_info import calculate_groupedlinear_tflops_or_bw, calculate_linear_tflops_or_bw, calculate_scaled_dot_product_attention_flash_musa_flops
 
 DUP_LABEL = "@dup@"
 SHAPE_LABEL = "@shape@"
-ANNOTATE_LABEL = [DUP_LABEL, SHAPE_LABEL] 
-
-SHAPE_POSITION = {
-    # CheckpointWithoutOutputFunction is RMSNorm_2's parents
-    "nn.Module: RMSNorm_\d+": {
-        "type": "BW",
-        "ShapeFrom": r"CheckpointWithoutOutputFunction",
-        "formula": calculate_CheckpointWithoutOutputFunction,
-    },
-    "transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_grouped_gemm": {
-        "type": "TFLOPS",
-        "ShapeFrom": r'_GroupedLinear', #  r"nn.Module: TE(Row|Column)ParallelGroupedLinear_0"
-        "formula": calculate_groupedlinear_tflops_or_bw,
-    },
-    "transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_gemm": {
-        "type": "TFLOPS",
-        "ShapeFrom": r"(_Linear|_LayerNormLinear|RouterGatingLinearFunction)", # _Linear
-        "formula": calculate_linear_tflops_or_bw,
-    },
-    "aten::_scaled_dot_product_attention_flash_musa": {
-        "type": "TFLOPS",
-        "ShapeFrom": r"aten::_scaled_dot_product_attention_flash_musa",
-        "formula": calculate_scaled_dot_product_attention_flash_musa_flops,
-    },
-    "LinearWithGradAccumulationAndAsyncCommunication": {
-        "type": "TFLOPS",
-        "ShapeFrom": r"LinearWithGradAccumulationAndAsyncCommunication", # _Linear
-        "formula": calculate_linear_tflops_or_bw,
-    },
-    "aten::mm": {
-        "type": "TFLOPS",
-        "ShapeFrom": r"LinearWithGradAccumulationAndAsyncCommunicationBackward", # _Linear
-        "formula": calculate_linear_tflops_or_bw,
-    }
-}
-SHAPE_TO_FLOPS_FUNC =  {
-    "transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_grouped_gemm": "fused_multi_quantize",
-}
-
-SHAPE_TO_VOLUME_FUNC = {
-    "nn.Module: RMSNorm_\d+": "RMSNorm forward",
-}
+ANNOTATE_LABEL = [DUP_LABEL, SHAPE_LABEL]
 
 SHAPE_POSITION_FWD_BWD = {
     r"transformer_engine/pytorch/cpp_extensions/gemm.py\(\d+\): general_grouped_gemm": {
