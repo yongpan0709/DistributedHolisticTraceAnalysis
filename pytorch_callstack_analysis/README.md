@@ -167,39 +167,67 @@ pretrain_kimi.py(\d+): <module>
 
 ## Kernel-level shape / TFLOPS / bandwidth analysis
 
-`kernel_level_fwdbwd_statistics.py` is currently an exploratory analysis script rather than a fully parameterized CLI. It is best treated as a reusable template for kernel-level investigation.
+`kernel_level_fwdbwd_statistics.py` is now a command-line entrypoint for per-rank or all-rank kernel-level shape and MUSA TFLOPS / bandwidth analysis.
 
 ### Processing flow
 
-The script can:
+The script:
 
-1. locate forward kernels marked with `@shape@` in a call graph template;
-2. extract `input_dims` / `input_type` from the current node or a parent node;
-3. estimate shape-related metrics for:
-   - `general_gemm`,
-   - `general_grouped_gemm`,
-   - `quantize`,
-   - `aten::_scaled_dot_product_attention_flash_musa`;
-4. locate corresponding backward kernels and emit `bwd-0`, `bwd-1`, and similar positional statistics;
-5. write text output containing shape, mean kernel time, TFLOPS or bandwidth percentiles, and count.
+1. discovers rank trace files from `--trace-dir` with HTA `get_trace_files()`;
+2. enables `ParserConfig.ARGS_INPUT_SHAPE` before loading traces so `input_dims` / `input_type` are available;
+3. if `--rank` is provided, analyzes only that rank; otherwise analyzes all discovered ranks;
+4. for each selected rank:
+   - load the trace with HTA `Trace`;
+   - decode symbol IDs while preserving full function names;
+   - build a `CallGraph` and locate the rank's main stack;
+   - parse `kernel_level_template` and resolve normal / `@dup@` functions;
+   - fill `shape`, `TFLOPS`, and `GB/s` columns on the matched kernel nodes;
+   - compute forward `fwd-0` metrics and matched backward `bwd-0`, `bwd-1`, ... metrics;
+5. writes one text report per rank as `kernel-level-rank<rank>-fwdbwd.txt` under `--output-dir`.
 
-### Current script assumptions
+### Basic usage
 
-Unlike `model_level_fwdbwd_statistics.py`, this script still has hard-coded defaults in its `if __name__ == "__main__":` block:
+```bash
+python -m pytorch_callstack_analysis.kernel_level_fwdbwd_statistics \
+  --trace-dir /path/to/trace-dir \
+  --rank 32 \
+  --output-dir kernel_fwdbwd_statistics
+```
 
-- `base_dir = "../"`;
-- `trace_dir` points to `../perf`;
-- only `rank == 32` is analyzed;
-- output file names look like `20260211-<rank>.txt`;
-- `ParserConfig.ARGS_INPUT_SHAPE` is explicitly added so shape information is parsed.
+Output example:
 
-To use it directly, usually edit:
+```text
+kernel_fwdbwd_statistics/
+└── kernel-level-rank32-fwdbwd.txt
+```
 
-- `base_dir`;
-- `trace_dir`;
-- the target rank;
-- the output file name;
-- the template and shape-position mappings if the model or kernel names changed.
+### Analyze all ranks
+
+If `--rank` is omitted, the script analyzes every rank discovered under `--trace-dir`:
+
+```bash
+python -m pytorch_callstack_analysis.kernel_level_fwdbwd_statistics \
+  --trace-dir /path/to/trace-dir \
+  --output-dir kernel_fwdbwd_statistics
+```
+
+Output example:
+
+```text
+kernel_fwdbwd_statistics/
+├── kernel-level-rank0-fwdbwd.txt
+├── kernel-level-rank1-fwdbwd.txt
+├── kernel-level-rank2-fwdbwd.txt
+└── ...
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+| --- | --- | --- | --- |
+| `--trace-dir` | Yes | None | Trace directory. The script discovers rank traces from this directory. |
+| `--rank` | No | `None` | Rank to analyze. If omitted, all discovered ranks are analyzed. |
+| `--output-dir` / `--output` | No | `kernel_fwdbwd_statistics` | Output directory. Each rank writes `kernel-level-rank<rank>-fwdbwd.txt`. |
 
 ### Kernel output metrics
 
@@ -207,14 +235,22 @@ Kernel-level output includes:
 
 - `shape`;
 - `mean_time(us)`;
-- `TFLOPS` or `GB/s` mean;
+- mean `TFLOPS` or mean `GB/s`;
 - `q_25` / `q_50` / `q_75`;
 - `count`.
+
+Example:
+
+```text
+nn.Module: RMSNorm_0
+fwd-0 shape: [1, 8192],  mean_time(us): 12.34, BW mean: 456.78 GB/s, q_25: 430.00, q_50: 455.00, q_75: 480.00, count: 32
+bwd-0 shape: [1, 8192],  mean_time(us): 14.21, BW mean: 410.55 GB/s, q_25: 398.00, q_50: 408.00, q_75: 421.00, count: 32
+```
 
 ### Kernel analysis recommendations
 
 1. First run the model-level script on a representative rank and confirm the template matches real trace nodes.
-2. Enable `ParserConfig.ARGS_INPUT_SHAPE` before parsing; otherwise `input_dims` and `input_type` may be missing.
+2. Run the kernel-level script with the same trace set; shape parsing is enabled automatically inside the script.
 3. If model code or kernel names changed, update both `call_graph_template.py` `@shape@` entries and the script's `SHAPE_POSITION_FWD_BWD` / `SHAPE_POSITION_FWD_BWD_OF_FLASH_ATTENTION` mappings.
 4. Use kernel-level analysis for targeted operator drilldown, not as a replacement for the model-level report.
 
@@ -233,6 +269,7 @@ From `pytorch_callstack_analysis.utils.musa_fwdbwd_util`:
 From `pytorch_callstack_analysis.utils.musa_basic_kernel_info`:
 
 - `BYTES_DICT` / `get_num_of_bytes(dtype)`: dtype-to-byte mapping.
+- `drop_empty_arrays(...)`: normalize nested shape arrays by removing empty elements before metric calculation.
 - `calculate_linear_tflops_or_bw(...)`: TFLOPS or GB/s estimation for Linear-like kernels.
 - `calculate_groupedlinear_tflops_or_bw(...)`: estimation for grouped GEMM kernels.
 - `calculate_scaled_dot_product_attention_flash_musa_flops(...)`: FlashAttention FLOPS estimation.
@@ -242,12 +279,13 @@ From `pytorch_callstack_analysis.utils.musa_basic_kernel_info`:
 
 From `pytorch_callstack_analysis.utils.timing`:
 
+- `TimingRecord`: single timing record data structure.
 - `TimingTracker`: reusable named timer collection.
 - `QuickTimer`: lightweight one-off timer.
 - `MPITimer`: MPI-aware timer that prints on the root process.
 - `get_timer()`, `reset_timer()`: global timer helpers.
 - `time_it(name)`: timing decorator.
-- `measure_time(name)`: context-manager helper.
+- `measure_time(name)`: convenience context-manager helper backed by the global timer.
 
 Quick example:
 

@@ -22,19 +22,6 @@ from pytorch_callstack_analysis.call_graph_template import (
 )
 from pytorch_callstack_analysis.utils.musa_fwdbwd_util import get_forward_duration_dup, get_forward_duration_uniq
 
-#def extract_shape(func_name, df, func_mapping_node_index, need_shape_func_name):
-#    shape_info: Dict[str, Dict[str, pd.Series]] = defaultdict(lambda: defaultdict(pd.Series))
-#    for forward_func_name, _ in func_name:
-#        if forward_func_name.split('@')[0] in need_shape_func_name:
-#            func_index = func_mapping_node_index[forward_func_name]
-#            if len(func_index) == 0:
-#                continue
-#            shape_array = []
-#            for index, row in df[df.index.isin(func_index)].iterrows(): 
-#                shape_array.append(row['input_dims'][0][0])
-#            shape_info[forward_func_name]['data'] = pd.Series(shape_array)
-#            shape_info[forward_func_name]['example'] = df.loc[func_index[0], 'input_dims']
-#    return shape_info
 
 def extract_shape_from_parents_to_tflops_or_bw_in_fwd(func_name, df, func_mapping_node_index, need_shape_func_name, rank, cg, shape_position):
     tflop_bw_mapping_index: Dict[str, pd.Series] = defaultdict(pd.Series)
@@ -178,10 +165,8 @@ def analyze_rank(rank: int, trace_files: Dict[int, str], output_path: str):
 
     tflop_bw_mapping_index = extract_shape_from_parents_to_tflops_or_bw_in_fwd(func_name, df, func_mapping_node_index, need_shape_func_name, rank, cg, SHAPE_POSITION_FWD_BWD)
     tflop_bw_mapping_index_bwd = extract_shape_from_parents_to_tflops_or_bw_in_bwd(func_name, df, func_mapping_node_index, need_shape_func_name, rank, cg, SHAPE_POSITION_FWD_BWD)
-    #print('tflop_bw_mapping_index_bwd:', tflop_bw_mapping_index_bwd)
 
     with open(output_path, "w") as f:
-        #f.write(f"# Rank: {rank}\n")
         for forward_func_name, func_ancestors in func_name:
             if forward_func_name in tflop_bw_mapping_index:
                 index_series = tflop_bw_mapping_index[forward_func_name]
@@ -204,7 +189,6 @@ def analyze_rank(rank: int, trace_files: Dict[int, str], output_path: str):
                     f.write(f" q_25: {df_subset[calculate_type].quantile(.25):.2f}, q_50: {df_subset[calculate_type].quantile(.5):.2f}, q_75: {df_subset[calculate_type].quantile(.75):.2f},")
                     f.write(f" count: {len(df_subset)}\n")
             else:
-                #print(f'{"    " * len(func_ancestors)}{forward_func_name}')
                 f.write(f'{"    " * len(func_ancestors)}{forward_func_name}\n')
 
     print(f"Results for rank {rank} written to {output_path}")

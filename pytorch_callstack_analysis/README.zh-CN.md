@@ -167,39 +167,67 @@ pretrain_kimi.py(\d+): <module>
 
 ## Kernel 层级 shape / TFLOPS / 带宽分析
 
-`kernel_level_fwdbwd_statistics.py` 当前更像一个实验性分析脚本，而不是已经封装完成的通用 CLI。它适合作为 kernel 层级定位问题时的分析模板或二次开发入口。
+`kernel_level_fwdbwd_statistics.py` 现在已经是一个可直接使用的命令行入口，可按单个 rank 或全部 rank 做 kernel 层级 shape 与 MUSA TFLOPS / 带宽分析。
 
 ### 处理流程
 
-该脚本可以：
+该脚本会：
 
-1. 基于调用图模板定位带 `@shape@` 标记的 forward kernel；
-2. 从当前节点或父节点提取 `input_dims` / `input_type`；
-3. 对以下类型 kernel 计算 shape 相关指标：
-   - `general_gemm`；
-   - `general_grouped_gemm`；
-   - `quantize`；
-   - `aten::_scaled_dot_product_attention_flash_musa`；
-4. 关联 backward 路径中的对应 kernel，并输出 `bwd-0`、`bwd-1` 等位置统计；
-5. 将结果写入文本文件，输出 shape、平均 kernel 时间、TFLOPS 或带宽分位数以及 count。
+1. 通过 `--trace-dir` 指定 trace 目录，并使用 HTA `get_trace_files()` 自动发现 rank trace 文件；
+2. 在加载 trace 前自动启用 `ParserConfig.ARGS_INPUT_SHAPE`，确保 `input_dims` / `input_type` 可用；
+3. 如果指定 `--rank`，只分析该 rank；如果不指定，则分析全部发现的 rank；
+4. 对每个 rank：
+   - 使用 HTA `Trace` 加载 trace；
+   - decode symbol ID，并保留完整函数名；
+   - 构建 `CallGraph` 并定位该 rank 的 main stack；
+   - 解析 `kernel_level_template`，并处理普通函数与 `@dup@` 函数匹配；
+   - 在命中的 kernel 节点上填充 `shape`、`TFLOPS`、`GB/s` 列；
+   - 计算 forward 的 `fwd-0` 指标，以及匹配 backward 的 `bwd-0`、`bwd-1` 等位置指标；
+5. 每个 rank 输出一个文本报告，文件名为 `kernel-level-rank<rank>-fwdbwd.txt`，位于 `--output-dir` 下。
 
-### 当前脚本假设
+### 基本运行
 
-与 `model_level_fwdbwd_statistics.py` 不同，该脚本的 `if __name__ == "__main__":` 内仍有固定默认值：
+```bash
+python -m pytorch_callstack_analysis.kernel_level_fwdbwd_statistics \
+  --trace-dir /path/to/trace-dir \
+  --rank 32 \
+  --output-dir kernel_fwdbwd_statistics
+```
 
-- `base_dir = "../"`；
-- `trace_dir` 固定指向 `../perf`；
-- 默认只分析 `rank == 32`；
-- 默认输出文件名形如 `20260211-<rank>.txt`；
-- 启动前会显式把 `ParserConfig.ARGS_INPUT_SHAPE` 加入默认解析配置，以确保 shape 信息被提取出来。
+输出示例：
 
-如果要直接使用该脚本，通常需要修改：
+```text
+kernel_fwdbwd_statistics/
+└── kernel-level-rank32-fwdbwd.txt
+```
 
-- `base_dir`；
-- `trace_dir`；
-- 目标 rank；
-- 输出文件名；
-- 模板和 shape-position 映射，如果模型结构或 kernel 名称发生变化。
+### 分析全部 rank
+
+如果不传 `--rank`，脚本会分析 `--trace-dir` 中发现的全部 rank：
+
+```bash
+python -m pytorch_callstack_analysis.kernel_level_fwdbwd_statistics \
+  --trace-dir /path/to/trace-dir \
+  --output-dir kernel_fwdbwd_statistics
+```
+
+输出示例：
+
+```text
+kernel_fwdbwd_statistics/
+├── kernel-level-rank0-fwdbwd.txt
+├── kernel-level-rank1-fwdbwd.txt
+├── kernel-level-rank2-fwdbwd.txt
+└── ...
+```
+
+### 命令行参数
+
+| 参数 | 是否必需 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `--trace-dir` | 是 | 无 | trace 目录，脚本会从该目录自动发现 rank trace 文件。 |
+| `--rank` | 否 | `None` | 指定要分析的 rank；不指定时分析全部 rank。 |
+| `--output-dir` / `--output` | 否 | `kernel_fwdbwd_statistics` | 输出目录。每个 rank 输出一个 `kernel-level-rank<rank>-fwdbwd.txt` 文件。 |
 
 ### Kernel 输出指标
 
@@ -211,10 +239,18 @@ Kernel 层级输出包括：
 - `q_25` / `q_50` / `q_75`；
 - `count`。
 
+示例：
+
+```text
+nn.Module: RMSNorm_0
+fwd-0 shape: [1, 8192],  mean_time(us): 12.34, BW mean: 456.78 GB/s, q_25: 430.00, q_50: 455.00, q_75: 480.00, count: 32
+bwd-0 shape: [1, 8192],  mean_time(us): 14.21, BW mean: 410.55 GB/s, q_25: 398.00, q_50: 408.00, q_75: 421.00, count: 32
+```
+
 ### Kernel 分析建议
 
 1. 先用模型层级脚本确认模板能稳定匹配到目标函数，再做 kernel 级 shape / TFLOPS 分析。
-2. 运行前确认解析配置已经启用 `ParserConfig.ARGS_INPUT_SHAPE`，否则 `input_dims` 和 `input_type` 字段可能不存在。
+2. 直接运行 kernel 层级脚本即可，shape 解析会在脚本内部自动启用。
 3. 如果模型代码或 kernel 名称变化，优先更新 `call_graph_template.py` 中带 `@shape@` 的模板项，以及脚本内的 `SHAPE_POSITION_FWD_BWD` / `SHAPE_POSITION_FWD_BWD_OF_FLASH_ATTENTION` 映射。
 4. Kernel 层级分析适合针对特定算子细查，不建议替代模型层级报告。
 
@@ -233,6 +269,7 @@ Kernel 层级输出包括：
 来自 `pytorch_callstack_analysis.utils.musa_basic_kernel_info`：
 
 - `BYTES_DICT` / `get_num_of_bytes(dtype)`：dtype 到字节数的映射。
+- `drop_empty_arrays(...)`：在计算指标前清理嵌套 shape 数组中的空元素。
 - `calculate_linear_tflops_or_bw(...)`：Linear 类 kernel 的 TFLOPS 或 GB/s 估算。
 - `calculate_groupedlinear_tflops_or_bw(...)`：Grouped GEMM 场景估算。
 - `calculate_scaled_dot_product_attention_flash_musa_flops(...)`：FlashAttention FLOPS 估算。
@@ -242,12 +279,13 @@ Kernel 层级输出包括：
 
 来自 `pytorch_callstack_analysis.utils.timing`：
 
+- `TimingRecord`：单条计时记录的数据结构。
 - `TimingTracker`：可复用的命名计时器集合。
 - `QuickTimer`：轻量的一次性计时器。
 - `MPITimer`：MPI 环境计时器，仅在 root 进程打印。
 - `get_timer()`、`reset_timer()`：全局计时器辅助函数。
 - `time_it(name)`：计时装饰器。
-- `measure_time(name)`：便捷上下文管理器。
+- `measure_time(name)`：基于全局计时器的便捷上下文管理器。
 
 快速示例：
 
