@@ -46,6 +46,22 @@ MODEL_MAIN_STACK_TEST_DATASET: Dict[str, object] = {
     "template": "kimi_epoverlap",
 }
 
+KERNEL_LEVEL_TEST_DATASETS: Dict[str, Dict[str, object]] = {
+    "bf16": {
+        "name": "kernel_level_bf16",
+        "trace_filename": "kernel-level-bf16-rank8.json",
+        "expected_txt_name": "kernel-level-bf16-expected-analysis-results.txt",
+        "rank": 8,
+        "output_filename": "kernel-level-rank8-fwdbwd.txt",
+    },
+    "fp8": {
+        "name": "kernel_level_fp8",
+        "trace_filename": "kernel-level-fp8-rank8.json",
+        "expected_txt_name": "kernel-level-fp8-expected-analysis-results.txt",
+        "rank": 8,
+        "output_filename": "kernel-level-rank8-fwdbwd.txt",
+    },
+}
 
 # Dataset metadata configuration
 # Each entry contains:
@@ -147,6 +163,22 @@ def get_model_main_stack_expected_txt_url() -> str:
     return f"{BASE_URL}/{MODEL_MAIN_STACK_TEST_DATASET['expected_txt_name']}"
 
 
+def get_kernel_level_trace_url(dataset_name: str) -> str:
+    """Get the kernel-level trace URL for a dataset."""
+    if dataset_name not in KERNEL_LEVEL_TEST_DATASETS:
+        raise ValueError(f"Unknown kernel-level dataset: {dataset_name}")
+
+    return f"{BASE_URL}/{KERNEL_LEVEL_TEST_DATASETS[dataset_name]['trace_filename']}"
+
+
+def get_kernel_level_expected_txt_url(dataset_name: str) -> str:
+    """Get the kernel-level expected text URL for a dataset."""
+    if dataset_name not in KERNEL_LEVEL_TEST_DATASETS:
+        raise ValueError(f"Unknown kernel-level dataset: {dataset_name}")
+
+    return f"{BASE_URL}/{KERNEL_LEVEL_TEST_DATASETS[dataset_name]['expected_txt_name']}"
+
+
 def download_file(url: str, target_path: str, force_download: bool = False) -> Optional[str]:
     """Download a file if it does not exist."""
     if not force_download and os.path.exists(target_path):
@@ -192,6 +224,49 @@ def prepare_model_main_stack_dataset(
     )
     expected_result = download_file(
         get_model_main_stack_expected_txt_url(),
+        expected_txt_path,
+        force_download=force_download,
+    )
+
+    if trace_result is None or expected_result is None:
+        return None
+
+    return {
+        "trace_dir": dataset_dir,
+        "trace_path": trace_path,
+        "expected_txt_path": expected_txt_path,
+    }
+
+
+def prepare_kernel_level_dataset(
+    dataset_name: str,
+    target_dir: str,
+    force_download: bool = False,
+) -> Optional[Dict[str, str]]:
+    """Download trace and expected text for a kernel-level statistics test dataset."""
+    if dataset_name not in KERNEL_LEVEL_TEST_DATASETS:
+        raise ValueError(f"Unknown kernel-level dataset: {dataset_name}")
+
+    dataset = KERNEL_LEVEL_TEST_DATASETS[dataset_name]
+    dataset_dir = os.path.join(target_dir, dataset["name"])
+    trace_path = os.path.join(dataset_dir, dataset["trace_filename"])
+    expected_txt_path = os.path.join(dataset_dir, dataset["expected_txt_name"])
+
+    if not force_download and os.path.exists(trace_path) and os.path.exists(expected_txt_path):
+        print(f"Kernel-level dataset '{dataset_name}' already exists at {dataset_dir}, skipping download")
+        return {
+            "trace_dir": dataset_dir,
+            "trace_path": trace_path,
+            "expected_txt_path": expected_txt_path,
+        }
+
+    trace_result = download_file(
+        get_kernel_level_trace_url(dataset_name),
+        trace_path,
+        force_download=force_download,
+    )
+    expected_result = download_file(
+        get_kernel_level_expected_txt_url(dataset_name),
         expected_txt_path,
         force_download=force_download,
     )
@@ -345,21 +420,34 @@ def download_and_extract_dataset(
 def get_dataset_info(dataset_name: str) -> Dict:
     """
     Get information about a test dataset.
-    
+
     Args:
         dataset_name: Name of the dataset (key in MEGATRON_PIPELINE_TEST_DATASETS)
-    
+
     Returns:
         Dictionary containing dataset metadata including URL, expected CSV name,
         and parallel configuration (TP, PP, DP, EP, VPP, micro_batchsize)
     """
     if dataset_name not in MEGATRON_PIPELINE_TEST_DATASETS:
         raise ValueError(f"Unknown dataset: {dataset_name}")
-    
+
     info = MEGATRON_PIPELINE_TEST_DATASETS[dataset_name].copy()
     info["url"] = get_dataset_url(dataset_name)
     info["expected_csv_name"] = get_expected_csv_name(dataset_name)
-    
+    info["kind"] = "pipeline"
+
+    return info
+
+
+def get_kernel_level_dataset_info(dataset_name: str) -> Dict[str, object]:
+    """Get metadata for a kernel-level statistics test dataset."""
+    if dataset_name not in KERNEL_LEVEL_TEST_DATASETS:
+        raise ValueError(f"Unknown kernel-level dataset: {dataset_name}")
+
+    info = KERNEL_LEVEL_TEST_DATASETS[dataset_name].copy()
+    info["trace_url"] = get_kernel_level_trace_url(dataset_name)
+    info["expected_txt_url"] = get_kernel_level_expected_txt_url(dataset_name)
+    info["kind"] = "kernel_level"
     return info
 
 
