@@ -57,7 +57,7 @@ pip wheel . --wheel-dir=dist/ --no-deps --use-pep517 --no-build-isolation
 pip install traceinsight-*-py3-none-any.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Multi-node installation, useful when analyzing traces from 1000 GPUs or larger scales in parallel
-cd musa_examples/
+cd megatron_parallel_analysis/
 bash install_hta.sh <HolisticTraceAnalysis_Path>  # requires hostfile
 ```
 

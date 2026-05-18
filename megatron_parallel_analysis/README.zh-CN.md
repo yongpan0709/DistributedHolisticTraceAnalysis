@@ -56,7 +56,7 @@ pip wheel . --wheel-dir=dist/ --no-deps --use-pep517 --no-build-isolation
 # 或直接安装whl
 pip install traceinsight-*-py3-none-any.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
 # 安装多机(当1000卡甚至更大规模的trace需要分析时，可以支持多机并行分析)
-cd musa_examples/
+cd megatron_parallel_analysis/
 bash install_hta.sh <HolisticTraceAnalysis_Path>  # 需要hostfile
 
 ```
