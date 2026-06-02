@@ -273,7 +273,7 @@ class DistributedMegatronTraceAnalysis:
             return MegatronPipelineParallel1F1BInterleavedGroupTrace(
                 trace_files=None,
                 trace_dir=trace_dir,
-                dp=self.data_parallel_size,
+                dp=self.expert_data_parallel_size,
                 tp=self.tensor_parallel_size,
                 pp=self.pipeline_parallel_size,
                 ep=self.expert_model_parallel_size,
