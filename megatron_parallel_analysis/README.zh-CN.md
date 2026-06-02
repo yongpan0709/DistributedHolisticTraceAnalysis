@@ -217,6 +217,40 @@ workspace/
 4. `trace/report-pp<id>.csv`：当前 PP group 的 pipeline 分析报告。
 5. `output/stragglers/`：启用聚合与异常分析后保存 straggler 图表和结果。
 
+### `report-pp<id>.csv` 基类输出列说明
+
+[`megatron_pipeline_group_base.py`](megatron_pipeline_group_base.py#L372-L402) 生成的 `report-pp<id>.csv` 以每个 rank 一行的形式输出以下列：
+
+| 列名 | 说明 |
+| --- | --- |
+| `rank` | 当前这行结果对应的全局 rank 编号。 |
+| `time_per_iteration` | 该 rank 单次 iteration 的端到端耗时。 |
+| `num_microbatch` | 被分析 iteration 中配置或观测到的 micro batch 数量。 |
+| `forward_step_avg_time` | forward step 的平均耗时。 |
+| `fwd_step_std_time` | forward step 耗时的标准差。 |
+| `backward_step_avg_time` | backward step 的平均耗时。 |
+| `bwd_step_std_time` | backward step 耗时的标准差。 |
+| `compute_time_total` | 被分析 iteration 内累计的计算总耗时。 |
+| `comm_time_total` | 被分析 iteration 内累计的通信总耗时。 |
+| `comm_time_true` | 剔除被重叠隐藏的等待或额外开销后的纯通信耗时。 |
+| `overhead_wait_time_total` | 按 warmup、steady-state 和 cooldown 三个阶段构成；每个阶段都分为两部分：理论 bubble 时间，以及 PP stage 之间的实际等待耗时。 |
+| `bubble_time_warmup` | pipeline warmup 阶段中，由 PP stage 之间通信等额外因素引发、且不包含首个已计入理论 bubble 的其他实际 bubble 时间。 |
+| `bubble_time_steady` | pipeline steady-state 阶段中，由 PP stage 之间通信等额外因素引发、且不包含首个已计入理论 bubble 的其他实际 bubble 时间。 |
+| `bubble_time_cooldown` | pipeline cooldown 阶段中，由 PP stage 之间通信等额外因素引发、且不包含首个已计入理论 bubble 的其他实际 bubble 时间。 |
+| `theoretical_bubble_time_warmup` | warmup 阶段的理论 bubble 时间。 |
+| `theoretical_bubble_time_steady` | steady-state 阶段的理论 bubble 时间。 |
+| `theoretical_bubble_time_cooldown` | cooldown 阶段的理论 bubble 时间。 |
+| `overhead_wait_time_ratio` | `overhead_wait_time_total / time_per_iteration` 的占比。 |
+| `bubble_time_ratio` | `overhead_wait_time_total / (compute_time_total + comm_time_total)` 的占比。 |
+| `bubble_time_ratio_theoretical` | 根据 micro batch 数量计算得到的理论 bubble 占比。 |
+| `pipeline_parallel_size` | 配置的 Pipeline Parallel size（`PP`）。 |
+| `comm_time_true_ratio` | `comm_time_true / time_per_iteration` 的占比。 |
+| `comp_time_ratio` | `compute_time_total / time_per_iteration` 的占比。 |
+| `comm_time_ratio` | `comm_time_total / time_per_iteration` 的占比。 |
+| `finalize_model_grads_step_time` | `finalize_model_grads` 步骤的耗时。 |
+| `logical_and_across_model_parallel_group_time` | model parallel group 内 logical-and 同步操作的耗时。 |
+| `optimizer_time_total` | optimizer 步骤的总耗时。 |
+
 ## 运行前检查项
 
 1. **Trace 文件完整性**：确认每个 rank 的 trace 文件存在，命名能被 HTA 的 `get_trace_files()` 识别。
