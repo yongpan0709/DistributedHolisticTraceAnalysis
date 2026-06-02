@@ -145,7 +145,8 @@ class DistributedMegatronTraceAnalysis:
         self.pipeline_parallel_size = pp
         self.expert_model_parallel_size = ep
         self.context_parallel_size = cp
-        
+        edp = dp/ep
+        self.expert_data_parallel_size = edp
         assert pp_schedule in ['1f1b', '1f1b-interleaved', '1f1b-interleaved-epoverlap'], \
             f'Invalid pp schedule: {pp_schedule}'
         self.pp_schedule = pp_schedule
@@ -162,7 +163,7 @@ class DistributedMegatronTraceAnalysis:
         self.processor_name = MPI.Get_processor_name()
         
         self.expert_decoder_rank_generator = RankGenerator(
-            tp=tp, ep=ep, dp=dp, pp=pp, cp=cp, order=order, rank_offset=0
+            tp=tp, ep=ep, dp=edp, pp=pp, cp=cp, order=order, rank_offset=0
         )
         self.all_data_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('dp')
         self.all_tensor_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('tp')
