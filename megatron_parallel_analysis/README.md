@@ -1,4 +1,4 @@
-# megatron_parallel_analysis
+# DHTA: megatron_parallel_analysis
 
 > 中文文档: [README.zh-CN.md](README.zh-CN.md)
 
@@ -25,6 +25,7 @@ This directory only contains Megatron distributed and pipeline-specific analysis
 megatron_parallel_analysis/
 ├── distribute_trace_analysis.py
 ├── run_distributed_megatron_trace_analysis.py
+├── trace_etl.py
 ├── megatron_pipeline_group_base.py
 ├── megatron_pipeline_group_1f1b.py
 ├── megatron_pipeline_group_1f1b_interleaved.py
@@ -61,90 +62,6 @@ cd megatron_parallel_analysis/
 bash install_hta.sh <HolisticTraceAnalysis_Path>  # requires hostfile
 ```
 
-## Core modules
-
-### `distribute_trace_analysis.py`
-
-The main distributed orchestration module. Its primary class is `DistributedMegatronTraceAnalysis`.
-
-During initialization, it:
-
-1. records the trace directory and TP / CP / EP / DP / PP / VPP / micro batch settings;
-2. initializes `MPI.COMM_WORLD` and discovers the current MPI rank, world size, and processor name;
-3. uses `RankGenerator` to create DP / TP / PP rank groups;
-4. creates the workspace, output, log, and straggler directories;
-5. partitions trace files by PP group;
-6. assigns PP group tasks across MPI processes.
-
-For each PP group, it:
-
-1. creates the schedule-specific pipeline trace object from `--pp-schedule`;
-2. parses the rank traces in the PP group and builds call graphs;
-3. filters and keeps communication-related traces;
-4. assigns micro batch IDs;
-5. establishes P2P links between adjacent pipeline stages;
-6. writes a communication trace JSON file and a CSV report.
-
-### `run_distributed_megatron_trace_analysis.py`
-
-A configurable command-line entrypoint that creates `DistributedMegatronTraceAnalysis` and calls `analyze()`.
-
-Basic example:
-
-```bash
-python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 4 \
-  --dp 2 \
-  --ep 8 \
-  --num-bs 16 \
-  --pp-schedule 1f1b
-```
-
-Analyze only a subset of PP groups:
-
-```bash
-python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 4 \
-  --dp 2 \
-  --ep 8 \
-  --num-bs 16 \
-  --pp-schedule 1f1b \
-  --pp-group-id-range 0 3
-```
-
-For interleaved or EP-overlap schedules, pass VPP explicitly:
-
-```bash
-python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 2 \
-  --dp 1 \
-  --ep 8 \
-  --num-bs 16 \
-  --vpp 2 \
-  --pp-schedule 1f1b-interleaved
-```
-
-### Pipeline group analyzers
-
-- `megatron_pipeline_group_base.py`: base class for PP group trace analysis; provides shared trace parsing, communication filtering, micro batch labeling, P2P linking, and report generation.
-- `megatron_pipeline_group_1f1b.py`: analysis for Megatron `1f1b` scheduling.
-- `megatron_pipeline_group_1f1b_interleaved.py`: analysis for Megatron interleaved 1F1B scheduling.
-- `megatron_pipeline_group_1f1b_interleaved_epoverlap.py`: analysis for Megatron interleaved scheduling with EP overlap.
-
-### `utils/`
-
-- `parallel_state.py`: generates Megatron-style TP / CP / EP / DP / PP rank groups.
-- `pipeline_parallel_utils.py`: helpers for pipeline stages, micro batches, and P2P communication.
-- `trace_filter_utils.py`: trace filtering utilities.
-- `call_graph_utils.py`: helpers for locating the main stack from an HTA `CallGraph`.
-- `utils.py`: general helpers for directory preparation and trace file partitioning.
-
 ## Command-line arguments
 
 | Argument | Required | Default | Description |
@@ -159,9 +76,51 @@ python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
 | `--vpp` | No | `2` | Virtual Pipeline Parallel size, used only by interleaved schedules. |
 | `--pp-group-id-range` | No | `None` | Inclusive PP group range to analyze, formatted as `START END`. |
 
-## MPI multi-node / multi-process execution
+## MPI multi-process execution examples
 
-For large traces, run the entrypoint with MPI so multiple processes can analyze different PP groups in parallel.
+For large traces, run with MPI so multiple processes can analyze different PP groups in parallel.
+
+- `--map-by ppr:<cnt>:node` specifies `<cnt>` MPI processes per node.
+- `-np` is usually the number of nodes in `hostfile` multiplied by the number of processes per node.
+- The process count does not need to equal the number of PP groups. DHTA divides PP groups across the available MPI processes; the last MPI process may receive the remaining non-evenly-divisible PP groups. For example, with `-np 3` and 8 PP groups, the assignment is `3 + 3 + 2`.
+
+```bash
+# Two nodes, with 8 MPI processes started on each node
+mpirun -allow-run-as-root -np 16 --bind-to none \
+  --hostfile ./hostfile \
+  --map-by ppr:8:node \
+  --wdir /path/to/HolisticTraceAnalysis \
+  ...
+```
+
+### ETL data cleaning
+
+`trace_etl.py` is used for trace pre-processing. It filters noisy events from raw traces and writes the cleaned traces into a sibling `<trace-dir>-etl` directory.
+
+Single-process example:
+
+```bash
+python -m megatron_parallel_analysis.trace_etl \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 4 \
+  --dp 2 \
+  --ep 8
+```
+
+```bash
+mpirun -allow-run-as-root -np 2 --bind-to none \
+  --hostfile ./hostfile \
+  --map-by ppr:1:node \
+  --wdir /path/to/HolisticTraceAnalysis \
+  python -m megatron_parallel_analysis.trace_etl \
+    --trace-dir /path/to/trace-dir \
+    --tp 1 --pp 4 --dp 2 --ep 8
+```
+
+Do not run `python megatron_parallel_analysis/trace_etl.py` directly. The file uses package imports and should be started with `python -m megatron_parallel_analysis.trace_etl` from the repository root or an environment where the package is importable.
+
+### Pipeline Parallel Group analysis
 
 ```bash
 mpirun -allow-run-as-root -np 2 --bind-to none \
@@ -170,26 +129,25 @@ mpirun -allow-run-as-root -np 2 --bind-to none \
   --wdir /path/to/HolisticTraceAnalysis \
   python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
     --trace-dir /path/to/trace-dir \
-    --tp 1 --pp 4 --dp 2 --ep 8 --num-bs 16
+    --tp 1 --pp 4 --dp 16 --ep 8 --num-bs 16
 ```
 
 Example with more processes:
 
 ```bash
+# Two nodes, with 8 MPI processes started on each node
 mpirun -allow-run-as-root -np 16 --bind-to none \
   --hostfile ./hostfile \
   --map-by ppr:8:node \
   --wdir /path/to/HolisticTraceAnalysis \
   python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
     --trace-dir /path/to/trace-dir \
-    --tp 1 --pp 31 --dp 3 --ep 8 --num-bs 128
+    --tp 1 --pp 31 --dp 24 --ep 8 --num-bs 128
 ```
 
-`-np` is usually the number of nodes in `hostfile` multiplied by the number of processes per node. `--map-by ppr:<cnt>:node` starts `<cnt>` MPI processes per machine. The process count does not need to equal the number of PP groups; the analyzer divides PP groups across the available MPI processes.
+### Analysis results and output structure
 
-## Workspace and outputs
-
-The analyzer writes results under the current working directory:
+The run creates a `workspace` directory under the current working directory:
 
 ```text
 workspace/
@@ -275,3 +233,92 @@ The `report-pp<id>.csv` generated by [`megatron_pipeline_group_base.py`](megatro
 - **Empty report or missing P2P links**: confirm the trace contains the target iteration, pipeline send / recv events, and GPU kernel events.
 - **MPI launch failure**: check hostfile, working directory, Python environment, `mpi4py`, and SSH configuration.
 - **Unexpected interleaved results**: confirm `--vpp` matches the virtual pipeline parallel size used in training.
+
+## Core modules
+
+### `distribute_trace_analysis.py`
+
+The main distributed orchestration module. Its primary class is `DistributedMegatronTraceAnalysis`.
+
+During initialization, it:
+
+1. records the trace directory and TP / CP / EP / DP / PP / VPP / micro batch settings;
+2. initializes `MPI.COMM_WORLD` and discovers the current MPI rank, world size, and processor name;
+3. uses `RankGenerator` to create DP / TP / PP rank groups;
+4. creates the workspace, output, log, and straggler directories;
+5. partitions trace files by PP group;
+6. assigns PP group tasks across MPI processes.
+
+For each PP group, it:
+
+1. creates the schedule-specific pipeline trace object from `--pp-schedule`;
+2. parses the rank traces in the PP group and builds call graphs;
+3. filters and keeps communication-related traces;
+4. assigns micro batch IDs;
+5. establishes P2P links between adjacent pipeline stages;
+6. writes a communication trace JSON file and a CSV report.
+
+### `run_distributed_megatron_trace_analysis.py`
+
+A configurable command-line entrypoint that creates `DistributedMegatronTraceAnalysis` and calls `analyze()`.
+
+Basic example:
+
+```bash
+python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 4 \
+  --dp 2 \
+  --ep 8 \
+  --num-bs 16 \
+  --pp-schedule 1f1b
+```
+
+Analyze only a subset of PP groups:
+
+```bash
+python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 4 \
+  --dp 2 \
+  --ep 8 \
+  --num-bs 16 \
+  --pp-schedule 1f1b \
+  --pp-group-id-range 0 3
+```
+
+For interleaved or EP-overlap schedules, pass VPP explicitly:
+
+```bash
+python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 2 \
+  --dp 1 \
+  --ep 8 \
+  --num-bs 16 \
+  --vpp 2 \
+  --pp-schedule 1f1b-interleaved
+```
+
+### `trace_etl.py`
+
+ETL data-cleaning command-line entrypoint. See the “ETL data cleaning” section above.
+
+### Pipeline group analyzers
+
+- `megatron_pipeline_group_base.py`: base class for PP group trace analysis; provides shared trace parsing, communication filtering, micro batch labeling, P2P linking, and report generation.
+- `megatron_pipeline_group_1f1b.py`: analysis for Megatron `1f1b` scheduling.
+- `megatron_pipeline_group_1f1b_interleaved.py`: analysis for Megatron interleaved 1F1B scheduling.
+- `megatron_pipeline_group_1f1b_interleaved_epoverlap.py`: analysis for Megatron interleaved scheduling with EP overlap.
+
+### `utils/`
+
+- `parallel_state.py`: generates Megatron-style TP / CP / EP / DP / PP rank groups.
+- `pipeline_parallel_utils.py`: helpers for pipeline stages, micro batches, and P2P communication.
+- `trace_filter_utils.py`: trace filtering utilities.
+- `call_graph_utils.py`: helpers for locating the main stack from an HTA `CallGraph`.
+- `utils.py`: general helpers for directory preparation and trace file partitioning.
+

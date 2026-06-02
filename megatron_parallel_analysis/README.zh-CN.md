@@ -1,17 +1,16 @@
-# megatron_parallel_analysis
+# DHTA: megatron_parallel_analysis
 
 > English documentation: [README.md](README.md)
 
-`megatron_parallel_analysis` 是 HTA 面向 Megatron-LM Pipeline Parallel 训练场景扩展出的分布式 trace 分析模块。它以 Pipeline Parallel Group（PP group）为任务单元，将大规模多 rank trace 切分到不同 MPI 进程处理，在每个 PP group 内构建调用图、识别 pipeline stage、关联相邻 stage 的 P2P 通信，并输出可用于分析 pipeline bubble、stage 负载不均衡和异常耗时的报告。
+`megatron_parallel_analysis` 是 HTA 面向 Megatron-LM Pipeline Parallel 训练场景的分布式 trace 性能分析工具。它以 Pipeline Parallel Group（PP group）为任务单元，将大规模多 rank trace 切分到不同 MPI 进程处理，在每个 PP group 内构建调用图、识别 pipeline stage、关联相邻 stage 的 P2P 通信，并输出可用于分析 pipeline bubble、stage 负载不均衡和异常耗时的报告。
 
-该目录只包含 Megatron 分布式与 pipeline 专项分析逻辑；基于 PyTorch callstack 模板的模型层级、kernel 层级统计位于 [`pytorch_callstack_analysis/`](../pytorch_callstack_analysis/README.zh-CN.md)。
 
 ## 功能概览
 
-- **按 PP group 分发分析任务**：根据 TP / CP / EP / DP / PP 配置生成并行组，把原始 rank trace 软链接或分组到 `workspace/<trace-name>/trace/pp_group_<id>/`。
+- **按 PP group 分发分析任务**：根据 TP / CP / EP / DP / PP 配置生成并行组。
 - **MPI 多进程并行处理**：每个 MPI 进程负责一段 PP group，降低单进程加载和解析大规模 trace 的压力。
 - **Pipeline 调度专项分析**：支持 `1f1b`、`1f1b-interleaved`、`1f1b-interleaved-epoverlap` 三类调度。
-- **节点内 PP group 分析**：为每个 PP group 构建 HTA `Trace` / `CallGraph`，提取通信相关 trace，设置 micro batch ID，并关联相邻 stage 的 P2P send / recv。
+- **PP group 分析**：为每个 PP group 构建 HTA `Trace` / `CallGraph`，提取通信相关函数，关联相邻 stage 的 P2P send / recv，计算实际的通信耗时和等待耗时 wait time。
 - **报告与 trace 导出**：为每个 PP group 输出 `report-pp<id>.csv` 和 `pp<id>-trace.json`，用于观察 stage 等待、bubble、通信和负载差异。
 - **集群级聚合能力**：保留跨 MPI rank 聚合与异常检测逻辑，可进一步启用 PP group 间、layer 间的 straggler 分析。
 
@@ -25,6 +24,7 @@
 megatron_parallel_analysis/
 ├── distribute_trace_analysis.py
 ├── run_distributed_megatron_trace_analysis.py
+├── trace_etl.py
 ├── megatron_pipeline_group_base.py
 ├── megatron_pipeline_group_1f1b.py
 ├── megatron_pipeline_group_1f1b_interleaved.py
@@ -61,90 +61,6 @@ bash install_hta.sh <HolisticTraceAnalysis_Path>  # 需要hostfile
 
 ```
 
-## 核心模块
-
-### `distribute_trace_analysis.py`
-
-分布式 Megatron trace 分析的核心编排模块，主要类是 `DistributedMegatronTraceAnalysis`。
-
-初始化时会完成：
-
-1. 记录 trace 目录和 TP / CP / EP / DP / PP / VPP / micro batch 配置；
-2. 初始化 `MPI.COMM_WORLD`，获取当前 MPI rank、world size 和节点名；
-3. 使用 `RankGenerator` 生成 DP / TP / PP 并行组；
-4. 创建 workspace、output、log、stragglers 目录；
-5. 按 PP group 将 trace 文件分组；
-6. 将 PP group 任务切分给不同 MPI 进程。
-
-每个 PP group 的处理流程是：
-
-1. 根据 `--pp-schedule` 创建对应的 pipeline trace 对象；
-2. 解析当前 PP group 内的 rank trace 并构建调用图；
-3. 过滤并保留通信相关 trace；
-4. 设置 micro batch ID；
-5. 建立相邻 pipeline stage 之间的 P2P 链接；
-6. 输出通信 trace JSON 和 CSV 报告。
-
-### `run_distributed_megatron_trace_analysis.py`
-
-可配置的命令行入口，直接创建 `DistributedMegatronTraceAnalysis` 并调用 `analyze()`。
-
-常用示例：
-
-```bash
-python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 4 \
-  --dp 2 \
-  --ep 8 \
-  --num-bs 16 \
-  --pp-schedule 1f1b
-```
-
-只分析部分 PP group：
-
-```bash
-python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 4 \
-  --dp 2 \
-  --ep 8 \
-  --num-bs 16 \
-  --pp-schedule 1f1b \
-  --pp-group-id-range 0 3
-```
-
-Interleaved / EP overlap 场景可额外指定 VPP：
-
-```bash
-python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 2 \
-  --dp 1 \
-  --ep 8 \
-  --num-bs 16 \
-  --vpp 2 \
-  --pp-schedule 1f1b-interleaved
-```
-
-### Pipeline group 分析类
-
-- `megatron_pipeline_group_base.py`：PP group trace 分析基类，提供 trace 解析、通信过滤、micro batch 标注、P2P 链接和报告生成的共用能力。
-- `megatron_pipeline_group_1f1b.py`：Megatron `1f1b` 调度分析。
-- `megatron_pipeline_group_1f1b_interleaved.py`：Megatron interleaved 1F1B 调度分析。
-- `megatron_pipeline_group_1f1b_interleaved_epoverlap.py`：Megatron interleaved + EP overlap 调度分析。
-
-### `utils/`
-
-- `parallel_state.py`：生成 Megatron 风格的 TP / CP / EP / DP / PP rank group。
-- `pipeline_parallel_utils.py`：pipeline stage、micro batch、P2P 通信等辅助逻辑。
-- `trace_filter_utils.py`：trace 过滤工具。
-- `call_graph_utils.py`：从 HTA `CallGraph` 中定位 main stack 等辅助函数。
-- `utils.py`：目录准备、trace 文件分组等通用工具。
-
 ## 命令行参数
 
 | 参数 | 是否必需 | 默认值 | 说明 |
@@ -159,9 +75,52 @@ python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
 | `--vpp` | 否 | `2` | Virtual Pipeline Parallel size，仅 interleaved 类调度使用。 |
 | `--pp-group-id-range` | 否 | `None` | 仅分析指定 PP group 闭区间，格式为 `START END`。 |
 
-## MPI 多机/多进程运行
 
+
+## MPI 多进程运行示例：
 大规模 trace 建议用 MPI 启动，让多个进程并行处理不同 PP group。
+
+* `--map-by ppr:<cnt>:node` 表示每个节点配置的进程数 `<cnt>` 个 MPI 进程;
+* `-np` 通常按 `hostfile` 中节点数（ip的个数）乘以每节点配置的进程数；
+* 实际进程数不需要等于 PP group 数，DHTA工具会把 PP group 均分给可用 MPI 进程，最后一个 MPI 进程，可能会分到剩余不整除的部分 PP group。例如：启动 -np 3，但是有8个 PP groups时，会分成 3 + 3 + 2 的分配方式。
+  
+```bash
+#两个节点，每个节点上启动8个MPI 进程的配置
+mpirun -allow-run-as-root -np 16 --bind-to none \
+  --hostfile ./hostfile \
+  --map-by ppr:8:node \
+  --wdir /path/to/HolisticTraceAnalysis \
+  ...
+```
+
+### ETL 数据清洗
+
+`trace_etl.py` 用于 trace 预处理，会先过滤原始 trace 中的噪声事件，将清洗后的 trace 输出到同级的 `<trace-dir>-etl` 目录。
+
+单机运行示例：
+
+```bash
+python -m megatron_parallel_analysis.trace_etl \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 4 \
+  --dp 2 \
+  --ep 8
+```
+
+```bash
+mpirun -allow-run-as-root -np 2 --bind-to none \
+  --hostfile ./hostfile \
+  --map-by ppr:1:node \
+  --wdir /path/to/HolisticTraceAnalysis \
+  python -m megatron_parallel_analysis.trace_etl \
+    --trace-dir /path/to/trace-dir \
+    --tp 1 --pp 4 --dp 2 --ep 8
+```
+
+不要直接执行 `python megatron_parallel_analysis/trace_etl.py`。该文件使用了包导入，应该在仓库根目录下或已可导入该包的环境中，通过 `python -m megatron_parallel_analysis.trace_etl` 启动。
+
+### Pipeline Parallel Group 分析
 
 ```bash
 mpirun -allow-run-as-root -np 2 --bind-to none \
@@ -170,26 +129,27 @@ mpirun -allow-run-as-root -np 2 --bind-to none \
   --wdir /path/to/HolisticTraceAnalysis \
   python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
     --trace-dir /path/to/trace-dir \
-    --tp 1 --pp 4 --dp 2 --ep 8 --num-bs 16
+    --tp 1 --pp 4 --dp 16 --ep 8 --num-bs 16
 ```
 
 更多进程示例：
 
 ```bash
+#两个节点，每个节点上启动8个MPI 进程的配置
 mpirun -allow-run-as-root -np 16 --bind-to none \
   --hostfile ./hostfile \
   --map-by ppr:8:node \
   --wdir /path/to/HolisticTraceAnalysis \
   python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
     --trace-dir /path/to/trace-dir \
-    --tp 1 --pp 31 --dp 3 --ep 8 --num-bs 128
+    --tp 1 --pp 31 --dp 24 --ep 8 --num-bs 128
 ```
 
-`-np` 通常按 `hostfile` 中节点数乘以每节点进程数配置；`--map-by ppr:<cnt>:node` 表示每台机器启动 `<cnt>` 个 MPI 进程。实际进程数不需要等于 PP group 数，分析器会把 PP group 均分给可用 MPI 进程。
 
-## Workspace 与输出结构
 
-运行后会在当前工作目录下生成：
+### 分析结果与输出结构
+
+运行后会在当前工作目录下创建workspace目录：
 
 ```text
 workspace/
@@ -275,3 +235,92 @@ workspace/
 - **报告为空或 P2P 链接缺失**：检查 trace 是否包含目标 iteration、pipeline send / recv 事件和 GPU kernel 事件。
 - **MPI 运行失败**：检查 hostfile、工作目录、Python 环境、`mpi4py` 安装和节点间 SSH 配置。
 - **interleaved 结果异常**：确认 `--vpp` 与训练时 virtual pipeline parallel size 一致。
+
+## 核心模块
+
+### `distribute_trace_analysis.py`
+
+分布式 Megatron trace 分析的核心编排模块，主要类是 `DistributedMegatronTraceAnalysis`。
+
+初始化时会完成：
+
+1. 记录 trace 目录和 TP / CP / EP / DP / PP / VPP / micro batch 配置；
+2. 初始化 `MPI.COMM_WORLD`，获取当前 MPI rank、world size 和节点名；
+3. 使用 `RankGenerator` 生成 DP / TP / PP 并行组；
+4. 创建 workspace、output、log、stragglers 目录；
+5. 按 PP group 将 trace 文件分组；
+6. 将 PP group 任务切分给不同 MPI 进程。
+
+每个 PP group 的处理流程是：
+
+1. 根据 `--pp-schedule` 创建对应的 pipeline trace 对象；
+2. 解析当前 PP group 内的 rank trace 并构建调用图；
+3. 过滤并保留通信相关 trace；
+4. 设置 micro batch ID；
+5. 建立相邻 pipeline stage 之间的 P2P 链接；
+6. 输出通信 trace JSON 和 CSV 报告。
+
+### `run_distributed_megatron_trace_analysis.py`
+
+可配置的命令行入口，直接创建 `DistributedMegatronTraceAnalysis` 并调用 `analyze()`。
+
+常用示例：
+
+```bash
+python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 4 \
+  --dp 2 \
+  --ep 8 \
+  --num-bs 16 \
+  --pp-schedule 1f1b
+```
+
+只分析部分 PP group：
+
+```bash
+python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 4 \
+  --dp 2 \
+  --ep 8 \
+  --num-bs 16 \
+  --pp-schedule 1f1b \
+  --pp-group-id-range 0 3
+```
+
+Interleaved / EP overlap 场景可额外指定 VPP：
+
+```bash
+python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
+  --trace-dir /path/to/trace-dir \
+  --tp 1 \
+  --pp 2 \
+  --dp 1 \
+  --ep 8 \
+  --num-bs 16 \
+  --vpp 2 \
+  --pp-schedule 1f1b-interleaved
+```
+
+### `trace_etl.py`
+
+ETL 数据清洗命令行入口，详见上文“ETL 数据清洗”。
+
+### Pipeline group 分析类
+
+- `megatron_pipeline_group_base.py`：PP group trace 分析基类，提供 trace 解析、通信过滤、micro batch 标注、P2P 链接和报告生成的共用能力。
+- `megatron_pipeline_group_1f1b.py`：Megatron `1f1b` 调度分析。
+- `megatron_pipeline_group_1f1b_interleaved.py`：Megatron interleaved 1F1B 调度分析。
+- `megatron_pipeline_group_1f1b_interleaved_epoverlap.py`：Megatron interleaved + EP overlap 调度分析。
+
+### `utils/`
+
+- `parallel_state.py`：生成 Megatron 风格的 TP / CP / EP / DP / PP rank group。
+- `pipeline_parallel_utils.py`：pipeline stage、micro batch、P2P 通信等辅助逻辑。
+- `trace_filter_utils.py`：trace 过滤工具。
+- `call_graph_utils.py`：从 HTA `CallGraph` 中定位 main stack 等辅助函数。
+- `utils.py`：目录准备、trace 文件分组等通用工具。
+
