@@ -145,7 +145,7 @@ class DistributedMegatronTraceAnalysis:
         self.pipeline_parallel_size = pp
         self.expert_model_parallel_size = ep
         self.context_parallel_size = cp
-        edp = dp/ep
+        edp = int(dp/ep)
         self.expert_data_parallel_size = edp
         assert pp_schedule in ['1f1b', '1f1b-interleaved', '1f1b-interleaved-epoverlap'], \
             f'Invalid pp schedule: {pp_schedule}'
@@ -262,7 +262,7 @@ class DistributedMegatronTraceAnalysis:
             return MegatronPipelineParallel1F1BGroupTrace(
                 trace_files=None, 
                 trace_dir=trace_dir,
-                dp=self.data_parallel_size,
+                dp=self.expert_data_parallel_size,
                 tp=self.tensor_parallel_size,
                 pp=self.pipeline_parallel_size,
                 ep=self.expert_model_parallel_size,
@@ -285,7 +285,7 @@ class DistributedMegatronTraceAnalysis:
             return MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(
                 trace_files=None,
                 trace_dir=trace_dir,
-                dp=self.data_parallel_size,
+                dp=self.expert_data_parallel_size,
                 tp=self.tensor_parallel_size,
                 pp=self.pipeline_parallel_size,
                 ep=self.expert_model_parallel_size,
@@ -712,7 +712,7 @@ class DistributedMegatronTraceAnalysis:
         logger.info(f"pp_group_id: {pp_group_id}, in target trace dir: {target_trace_dir}")
         t = MegatronPipelineParallelGroupTraceBase(
             None, self.trace_dir, 
-            dp=self.data_parallel_size, 
+            dp=self.expert_data_parallel_size, 
             tp=self.tensor_parallel_size, 
             pp=self.pipeline_parallel_size, 
             ep=self.expert_model_parallel_size, 
