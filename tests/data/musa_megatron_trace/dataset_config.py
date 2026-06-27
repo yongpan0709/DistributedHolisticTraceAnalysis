@@ -31,8 +31,8 @@ DATASET_FILES: Dict[str, str] = {
 
 # Expected CSV filenames for each dataset
 EXPECTED_CSV_NAMES: Dict[str, str] = {
-    "1f1b": "mccl-1f1b-tp1-pp4-dp2-ep8-expected_report-pp0.csv",
-    "1f1b-interleaved": "mooncake-vpp2-tp1-pp4-dp2-ep8-vpp2-expected_report-pp0.csv",
+    "1f1b": "mccl-1f1b-tp1-pp4-dp2-ep8-expected_report-pp0-detail.csv",
+    "1f1b-interleaved": "mooncake-vpp2-tp1-pp4-dp2-ep8-vpp2-expected_report-pp0-detail.csv",
     # Future datasets will be added here:
     # "1f1b-interleaved-epoverlap": "...expected_report-pp0.csv",
 }

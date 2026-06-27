@@ -80,11 +80,6 @@ def compare_csv_files(generated_path: str, expected_path: str, tolerance: float 
         'columns': list(generated_df.columns),
     }
 
-
-def get_detail_csv_path(csv_path: str) -> str:
-    root, ext = os.path.splitext(csv_path)
-    return f'{root}-detail{ext}'
-
 class TestMegatronPipeline(unittest.TestCase):
     """Test Megatron pipeline analysis for supported PP schedules."""
 
@@ -120,7 +115,7 @@ class TestMegatronPipeline(unittest.TestCase):
         return dataset_info, trace_dir, expected_csv_path
 
     def _run_analysis_and_compare(self, dataset_name: str):
-        dataset_info, trace_dir, expected_csv_path = self._prepare_dataset(dataset_name)
+        dataset_info, trace_dir, expected_detail_csv_path = self._prepare_dataset(dataset_name)
 
         analysis_kwargs = dict(
             trace_dir=trace_dir,
@@ -137,19 +132,13 @@ class TestMegatronPipeline(unittest.TestCase):
         dist_megatron_analysis = DistributedMegatronTraceAnalysis(**analysis_kwargs)
         dist_megatron_analysis.analyze(pp_group_id_range=(0, 0))
 
-        generated_csv_path = os.path.join(
+        generated_detail_csv_path = os.path.join(
             'workspace',
             dataset_name,
             'trace',
-            'report-pp0.csv',
+            'report-pp0-detail.csv',
         )
-        generated_detail_csv_path = get_detail_csv_path(generated_csv_path)
-        expected_detail_csv_path = get_detail_csv_path(expected_csv_path)
 
-        self.assertTrue(
-            os.path.exists(generated_csv_path),
-            f"Generated report CSV not found: {generated_csv_path}",
-        )
         self.assertTrue(
             os.path.exists(generated_detail_csv_path),
             f"Generated detail report CSV not found: {generated_detail_csv_path}",
@@ -159,7 +148,7 @@ class TestMegatronPipeline(unittest.TestCase):
             f"Expected detail report CSV not found: {expected_detail_csv_path}",
         )
 
-        comparison_result = compare_csv_files(generated_csv_path, expected_csv_path)
+        comparison_result = compare_csv_files(generated_detail_csv_path, expected_detail_csv_path)
         self.assertTrue(
             comparison_result['success'],
             f"CSV comparison failed. Differences: {comparison_result.get('differences', [])}",
