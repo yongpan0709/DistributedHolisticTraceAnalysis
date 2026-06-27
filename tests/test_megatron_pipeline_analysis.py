@@ -81,6 +81,10 @@ def compare_csv_files(generated_path: str, expected_path: str, tolerance: float 
     }
 
 
+def get_detail_csv_path(csv_path: str) -> str:
+    root, ext = os.path.splitext(csv_path)
+    return f'{root}-detail{ext}'
+
 class TestMegatronPipeline(unittest.TestCase):
     """Test Megatron pipeline analysis for supported PP schedules."""
 
@@ -99,7 +103,6 @@ class TestMegatronPipeline(unittest.TestCase):
         dataset_info = get_dataset_info(dataset_name)
         trace_dir = os.path.join(self.megatron_trace_dir, dataset_name)
         expected_csv_path = os.path.join(trace_dir, dataset_info['expected_csv_name'])
-        
         if not check_dataset_exists(trace_dir):
             download_and_extract_dataset(dataset_name, self.megatron_trace_dir)
 
@@ -114,7 +117,6 @@ class TestMegatronPipeline(unittest.TestCase):
             os.path.exists(expected_csv_path),
             f"Expected report CSV not found: {expected_csv_path}",
         )
-        
         return dataset_info, trace_dir, expected_csv_path
 
     def _run_analysis_and_compare(self, dataset_name: str):
@@ -141,9 +143,20 @@ class TestMegatronPipeline(unittest.TestCase):
             'trace',
             'report-pp0.csv',
         )
+        generated_detail_csv_path = get_detail_csv_path(generated_csv_path)
+        expected_detail_csv_path = get_detail_csv_path(expected_csv_path)
+
         self.assertTrue(
             os.path.exists(generated_csv_path),
             f"Generated report CSV not found: {generated_csv_path}",
+        )
+        self.assertTrue(
+            os.path.exists(generated_detail_csv_path),
+            f"Generated detail report CSV not found: {generated_detail_csv_path}",
+        )
+        self.assertTrue(
+            os.path.exists(expected_detail_csv_path),
+            f"Expected detail report CSV not found: {expected_detail_csv_path}",
         )
 
         comparison_result = compare_csv_files(generated_csv_path, expected_csv_path)
@@ -152,29 +165,13 @@ class TestMegatronPipeline(unittest.TestCase):
             f"CSV comparison failed. Differences: {comparison_result.get('differences', [])}",
         )
 
-        generated_df = pd.read_csv(generated_csv_path)
-        key_columns = [
-            'rank',
-            'time_per_iteration',
-            'num_microbatch',
-            'forward_step_avg_time',
-            'backward_step_avg_time',
-            'compute_time_total',
-            'comm_time_total',
-            'pipeline_parallel_size',
-        ]
-        for col in key_columns:
-            self.assertIn(col, generated_df.columns, f"Missing key column: {col}")
-
-        self.assertEqual(
-            generated_df['pipeline_parallel_size'].iloc[0],
-            dataset_info['pp_size'],
-            'Pipeline parallel size mismatch',
+        detail_comparison_result = compare_csv_files(
+            generated_detail_csv_path,
+            expected_detail_csv_path,
         )
-        self.assertEqual(
-            generated_df['num_microbatch'].iloc[0],
-            dataset_info['micro_batchsize'],
-            'Microbatch size mismatch',
+        self.assertTrue(
+            detail_comparison_result['success'],
+            f"Detail CSV comparison failed. Differences: {detail_comparison_result.get('differences', [])}",
         )
 
     def test_1f1b_analysis_results(self):

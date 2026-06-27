@@ -22,12 +22,12 @@ from megatron_parallel_analysis.utils.parallel_state import RankGenerator
 from megatron_parallel_analysis.utils.call_graph_utils import get_main_stack_on_rank
 
 
-def parallel_callgraph_create(rank_id, trace_file):
+def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_step'):
     logger.debug(f'rank id: {rank_id}, trace_file: {trace_file}')
     t = Trace(trace_files={rank_id: trace_file}, trace_dir="")
     t.load_traces()
     t.decode_symbol_ids(use_shorten_name=False)
-    cg = CallGraph(t)
+    cg = CallGraph(t, bwd_annotation_str=bwd_annotation_str)
     _, main_stack = get_main_stack_on_rank(cg, rank_id)
     full_df = main_stack.full_df.copy()
     del cg
@@ -52,6 +52,7 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         ep = -1,
         cp: int =1, order: str ="tp-cp-ep-dp-pp",
         micro_bs: int=0,
+        bwd_annotation_str: str = 'backward_step',
         # pp_schedule: str = "1f1b",
         # vpp_size = -1,
     ) -> None:
@@ -66,6 +67,7 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         self.expert_model_parallel_size = ep
         self.context_parallel_size = cp
         self.micro_bs = micro_bs
+        self.bwd_annotation_str = bwd_annotation_str
         # self.pp_schedule = pp_schedule
         # self.vpp_size = vpp_size
         self.expert_decoder_rank_generator = RankGenerator(
@@ -96,7 +98,10 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             return
         num_procs = min(mp.cpu_count(), len(self.all_pipeline_parallel_group_ranks[pp_group_id]))
         with mp.get_context("fork").Pool(num_procs) as pool:
-            tasks = [(rank_i, self.trace_files[rank_i]) for rank_i in self.all_pipeline_parallel_group_ranks[pp_group_id]]
+            tasks = [
+                (rank_i, self.trace_files[rank_i], self.bwd_annotation_str)
+                for rank_i in self.all_pipeline_parallel_group_ranks[pp_group_id]
+            ]
             results = pool.starmap(parallel_callgraph_create, tasks)
             pool.close()
             pool.join()
@@ -239,25 +244,20 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         #if meta_data is None:
         #    meta_data = self.meta_data
         trace_df_all_ranks = self.combine_into_one_trace(traces)
-        MegatronPipelineParallelGroupTraceBase.save_trace_df_to_file(trace_df_all_ranks, save_path) # Todo: enhance flow event:, trace_df_p2p_flow_events)
+        self.save_trace_df_to_file(trace_df_all_ranks, save_path) # Todo: enhance flow event:, trace_df_p2p_flow_events)
     
-    @staticmethod
-    def save_trace_df_to_file(df: pd.DataFrame, output_file: str, trace_df_p2p_comm_flow: pd.DataFrame=None, meta_data: dict=None):
+    def save_trace_df_to_file(self, df: pd.DataFrame, output_file: str, trace_df_p2p_comm_flow: pd.DataFrame=None, meta_data: dict=None, pp_schedule: str='1f1b'):
         columns_to_keep = ['name', 'cat', 'pid', 'tid', 'ts', 'dur', 'rank']
         columns_to_drop = ['s_name', 's_cat']
         
         new_df = df[columns_to_keep].copy()
-        new_df['ts'] = df['first_kernel_start']
-        new_df['dur'] = df['kernel_span']
+        new_df['ts'] = df['first_kernel_start'].where(df['first_kernel_start'] > 0, df['ts'])
+        new_df['dur'] = df['kernel_span'].where(df['kernel_span'] > 0, df['dur'])
         new_df['name'] = df['s_name']
         new_df['cat'] = df['s_cat']
         new_df['ph'] = 'X'
         # Todo: in interleaved PP, send_fwd_recv_fwd and send_bwd_recv_bwd execute asyn and in parallel with fwd_step or bwd_step
         # so for displaying in perfetto, it muse set them with different tids.
-        #new_df.loc[new_df['name'].str.match(pat=r"^(send_forward_recv_forward|send_backward_recv_backward)$"), 'tid'] = 1
-        #new_df.loc[new_df['name'].str.match(pat=r"^mccl:recv$"), 'tid'] = 2
-        #new_df.loc[new_df['name'].str.match(pat=r"^mccl:send$"), 'tid'] = 3
-        #new_df['args'] = df.apply(lambda row: {col: row[col] for col in row.index if col not in columns_to_keep + columns_to_drop}, axis=1)
 
         trace_data = meta_data.copy() if meta_data is not None else {}
         trace_events = new_df.to_dict('records')
@@ -314,7 +314,15 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         pattern = r'^finalize_model_grads$'
         finalize_model_grads_step_time = sorted_trace_df[sorted_trace_df['s_name'].str.contains(pattern)]['kernel_span'].values[0]
         return finalize_model_grads_step_time/1000
-    
+
+    def calculate_should_run_forward_backward_time(self, sorted_trace_df):
+        pattern = r'^should_run_forward_backward$'
+        should_run_forward_backward = sorted_trace_df[sorted_trace_df['s_name'].str.contains(pattern)]
+        if should_run_forward_backward.empty:
+            return 0.0
+        should_run_forward_backward_time = should_run_forward_backward['kernel_span'].values[0]
+        return should_run_forward_backward_time/1000
+
     # Todo: func name
     #       sorted_trace_df[sorted_trace_df['full_name'].str.contains(pattern, regex=True)]['dur'].values[0]   why use the first value
     def calculate_optimizer_step_time_and_bubble(self, sorted_trace_df):
@@ -322,94 +330,104 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         # Todo: func name
         # pattern = r'.*ProfilerStep.*/step.*'
         pattern = r'^step$'
-        optimizer_step_time = sorted_trace_df[sorted_trace_df['s_name'].str.contains(pattern)]['kernel_span'].values[0]
-        #if first_stage_optimizer_step_time is None:
-        #    first_stage_optimizer_step_time = optimizer_step_time
-        #bubble_time_final = optimizer_step_time - first_stage_optimizer_step_time
-        #return bubble_time_final, first_stage_optimizer_step_time, optimizer_step_time
-        return optimizer_step_time/1000
+        optimizer_step = sorted_trace_df[sorted_trace_df['s_name'].str.contains(pattern)].sort_values('ts').iloc[0]
+        optimizer_step_time = optimizer_step['kernel_span']/1000
+        optimizer_step_start_ts = optimizer_step['first_kernel_start']
+        return optimizer_step_time, optimizer_step_start_ts
     
     def calculate_logical_and_across_model_parallel_group_time(self, sorted_trace_df):
         pattern = r'^logical_and_across_model_parallel_group$'
         logical_and_across_model_parallel_group_time = sorted_trace_df[sorted_trace_df['s_name'].str.contains(pattern)]['kernel_span'].values[0]
         return logical_and_across_model_parallel_group_time/1000
-    
+
     def generate_report(self, pp_group_id, save_path):
         output_df = None
+        detail_output_df = None
         #first_stage_optimizer_step = None
-
+        stage_0_optimizer_step_start_ts = None
         for stage_id, rank in enumerate(sorted(self.traces_comm_only.keys())):
             sorted_trace_df = self.preprocess_trace_df(rank)
             time_per_iteration = self.calculate_time_per_iteration(rank)
             all_forward_steps_df = NameFilter(create_regex_for_prefix_match(['forward_step']))(sorted_trace_df)
             all_backward_steps_df = NameFilter(create_regex_for_prefix_match(['backward_step']))(sorted_trace_df)
-            #all_forward_steps_df.to_csv(f'all_forward_steps_df-{rank}-stageid-{stage_id}.csv')
-            #all_backward_steps_df.to_csv(f'all_backward_steps_df-{rank}-stageid-{stage_id}.csv')
             forward_step_avg_time, backward_step_avg_time, compute_time_total, fwd_std, bwd_std = self.calculate_step_times(all_forward_steps_df, all_backward_steps_df)
-
-            # 'send_forward_recv_backward',  'send_backward_recv_forward',
             all_comm_time_df = self.get_all_comm_df(sorted_trace_df, rank)
-            #all_comm_time_df.to_csv(f'all_comm_time_df-{rank}-stageid-{stage_id}.csv')
-            comm_time_total = self.calculate_comm_time_total(all_comm_time_df)
-
+            optimizer_time, optimizer_step_start_ts = self.calculate_optimizer_step_time_and_bubble(sorted_trace_df)
+            if stage_id == 0:
+                stage_0_optimizer_step_start_ts = optimizer_step_start_ts
             theoretical_bubble_time_warmup = self.calculate_theoretical_bubble_time_warmup(all_comm_time_df, stage_id)
             bubble_time_warmup = self.calculate_bubble_time_warmup(all_comm_time_df, stage_id) - theoretical_bubble_time_warmup
             theoretical_bubble_time_steady = self.calculate_theoretical_bubble_time_steady(all_comm_time_df, stage_id)
             bubble_time_steady = self.calculate_bubble_time_steady(all_comm_time_df, stage_id) - theoretical_bubble_time_steady
-            theoretical_bubble_time_cooldown = self.calculate_theoretical_bubble_time_cooldown(all_comm_time_df, stage_id)
-            bubble_time_cooldown = self.calculate_bubble_time_cooldown(all_comm_time_df, stage_id) - theoretical_bubble_time_cooldown
+            theoretical_bubble_time_cooldown = self.calculate_theoretical_bubble_time_cooldown(all_comm_time_df, all_backward_steps_df, stage_id, stage_0_optimizer_step_start_ts)
+            bubble_time_cooldown = self.calculate_bubble_time_cooldown(all_comm_time_df, stage_id)
             finalize_model_grads_step_time = self.calculate_finalize_model_grads_step_time(sorted_trace_df)
-            optimizer_time = self.calculate_optimizer_step_time_and_bubble(sorted_trace_df)
             logical_and_across_model_parallel_group_time = self.calculate_logical_and_across_model_parallel_group_time(sorted_trace_df)
+            should_run_forward_backward_time = self.calculate_should_run_forward_backward_time(sorted_trace_df)
             #bubble_time_total = bubble_time_warmup + bubble_time_steady + bubble_time_cooldown # + bubble_time_final
-            #comm_time_total += bubble_time_final
-            comm_time_true, overhead_wait_time_total = self.calculate_true_comm_and_overhead_wait_time(all_comm_time_df)
-            
-            #optimizer_time = self.calculate_optimizer_time(sorted_trace_df, bubble_time_final, stage_id, rank)
-            
-            num_microbatch = self.get_num_microbatches() 
+            comm_time_true  = self.calculate_true_comm(all_comm_time_df)
+            overhead_wait_time_total = theoretical_bubble_time_warmup + bubble_time_warmup + theoretical_bubble_time_steady + bubble_time_steady + theoretical_bubble_time_cooldown + bubble_time_cooldown
+            comm_time_total =  comm_time_true + overhead_wait_time_total
+
+            num_microbatch = self.get_num_microbatches()
 
             info_per_rank = {
-                'rank': rank,
-                'time_per_iteration': time_per_iteration,
-                'num_microbatch': num_microbatch,
-                'forward_step_avg_time': forward_step_avg_time,
-                'fwd_step_std_time': fwd_std,
-                'backward_step_avg_time': backward_step_avg_time,
-                'bwd_step_std_time': bwd_std,
+                'Global rank in a pp group, Rank_(i) + pp_size = Rank_(i+1)': rank,
+                'Elapsed time per iteration': time_per_iteration,
+                'Micro-Batch count': num_microbatch,
+                'Sum(Micro-Batch_forward_time + Micro-Batch_backward_time)': compute_time_total,
+                'PP SendRecv time': comm_time_total,
+                'Finalize_model_grads_step_time': finalize_model_grads_step_time,
+                'Should_run_forward_backward_time': should_run_forward_backward_time,
+                'Logical_and_across_model_parallel_group_time': logical_and_across_model_parallel_group_time,
+                'Optimizer_time': optimizer_time,
+                'Compute time total / Elapsed time per iteration': compute_time_total / time_per_iteration,
+                'PP SendRecv time / Elapsed time per iteration': comm_time_total / time_per_iteration,
+                'Finalize_model_grads_step_time / Elapsed time per iteration': finalize_model_grads_step_time / time_per_iteration,
+                'Should_run_forward_backward_time / Elapsed time per iteration': should_run_forward_backward_time / time_per_iteration,
+                'Logical_and_across_model_parallel_group_time / Elapsed time per iteration': logical_and_across_model_parallel_group_time / time_per_iteration,
+                'Optimizer_time / Elapsed time per iteration': optimizer_time / time_per_iteration,
+            }
+            detail_info_per_rank = {
+                'Global rank in a pp group, Rank_(i) + pp_size = Rank_(i+1)': rank,
+                'Elapsed time per iteration': time_per_iteration,
+                'Micro-Batch count': num_microbatch,
+                'SUM(micro_batch_forward_time) / Micro-Batch count': forward_step_avg_time,
+                'STD(micro_batch_forward_time) ': fwd_std,
+                'SUM(micro_batch_backward_time) / Micro-Batch count': backward_step_avg_time,
+                'STD(micro_batch_backward_time) ': bwd_std,
                 'compute_time_total': compute_time_total,
-                'comm_time_total': comm_time_total,
-                'comm_time_true': comm_time_true,
-                'overhead_wait_time_total': overhead_wait_time_total,
-                #'bubble_time_total': bubble_time_total,
-                'bubble_time_warmup': bubble_time_warmup,
-                'bubble_time_steady': bubble_time_steady,
-                'bubble_time_cooldown': bubble_time_cooldown,
-                'theoretical_bubble_time_warmup': theoretical_bubble_time_warmup,
-                'theoretical_bubble_time_steady': theoretical_bubble_time_steady,
-                'theoretical_bubble_time_cooldown': theoretical_bubble_time_cooldown,
-                #'bubble_time_final': bubble_time_final,
-                #'bubble_time_detail': [args['bubble_time_warmup'] / 1000, args['bubble_time_steady'] / 1000, args['bubble_time_cooldown'] / 1000],
-                'overhead_wait_time_ratio': overhead_wait_time_total / time_per_iteration,
-                'bubble_time_ratio': overhead_wait_time_total/ (compute_time_total + comm_time_total),
-                'bubble_time_ratio_theoretical': self.get_bubble_time_ratio_theoretical(num_microbatch),
-                'pipeline_parallel_size': self.pipeline_parallel_size,
-                'comm_time_true_ratio': comm_time_true / time_per_iteration,
-                'comp_time_ratio': compute_time_total / time_per_iteration,
-                'comm_time_ratio': comm_time_total / time_per_iteration,
-                'finalize_model_grads_step_time': finalize_model_grads_step_time,
-                'logical_and_across_model_parallel_group_time': logical_and_across_model_parallel_group_time,
-                'optimizer_time_total': optimizer_time,
+                'PP SendRecv time': comm_time_total,
+                'Actual transfer time of send-recv': comm_time_true,
+                'Bubble time of send-recv': overhead_wait_time_total,
+                'Theoretical bubble time warmup': theoretical_bubble_time_warmup,
+                'Theoretical bubble time steady': theoretical_bubble_time_steady,
+                'Theoretical bubble time cooldown': theoretical_bubble_time_cooldown,
+                'Non-balanced bubble time warmup': bubble_time_warmup,
+                'Non-balanced bubble time steady': bubble_time_steady,
+                'Non-balanced bubble time cooldown': bubble_time_cooldown,
+                'Theoretical bubble time / elapsed time per iteration': (theoretical_bubble_time_warmup + theoretical_bubble_time_steady + theoretical_bubble_time_cooldown) / time_per_iteration,
+                'Theoretical bubble time / SUM(micro_batch_forward_time + micro_batch_backward_time)': (theoretical_bubble_time_warmup + theoretical_bubble_time_steady + theoretical_bubble_time_cooldown) / (compute_time_total + comm_time_total),
+                'bubble_ratio in paper': self.get_bubble_time_ratio_theoretical(num_microbatch),
             }
             #info_per_rank = self._generate_info_per_rank(args)
 
             if output_df is None:
                 output_df = pd.DataFrame([info_per_rank])
+                detail_output_df = pd.DataFrame([detail_info_per_rank])
             else:
                 output_df.loc[len(output_df)] = info_per_rank
+                detail_output_df.loc[len(detail_output_df)] = detail_info_per_rank
 
         if save_path is not None:
             output_df.to_csv(save_path, header=True, index=False, float_format='%.3f')
+            save_root, save_ext = os.path.splitext(save_path)
+            detail_output_df.to_csv(
+                f'{save_root}-detail{save_ext}',
+                header=True,
+                index=False,
+                float_format='%.3f',
+            )
         #print(output_df)
         return output_df
 

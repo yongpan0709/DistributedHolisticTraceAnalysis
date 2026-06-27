@@ -154,23 +154,36 @@ class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceB
         send_backward_recv_forward_index = all_comm_time_df[all_comm_time_df['s_name'].str.contains(r'^send_backward_recv_forward.*')].index
         return all_comm_time_df.loc[send_forward_recv_backward_index, 'wait_time'].sum()/1000 + all_comm_time_df.loc[send_backward_recv_forward_index, 'wait_time'].sum()/1000
     
-    def calculate_theoretical_bubble_time_cooldown(self, all_comm_time_df, stage_id):
+    def calculate_theoretical_bubble_time_cooldown(self, all_comm_time_df, all_backward_steps_df, stage_id, stage_0_optimizer_step_start_ts):
         if stage_id == self.pipeline_parallel_size-1:
-            return 0.0
+            theoretical_bubble_time = 0.0
         else:
             recv_backward_index = all_comm_time_df[all_comm_time_df['s_name'].str.contains(r'^recv_backward(?:_\d+)?$')].index
-            return all_comm_time_df.loc[recv_backward_index, 'wait_time'].sum()/1000
+            send_backward_index = all_comm_time_df[all_comm_time_df['s_name'].str.contains(r'^send_backward(?:_\d+)?$')].index
+            theoretical_bubble_time = all_comm_time_df.loc[send_backward_index, 'wait_time'].sum() + all_comm_time_df.loc[recv_backward_index, 'wait_time'].sum()
+
+        if stage_0_optimizer_step_start_ts is not None:
+            if stage_id != 0:
+                send_backward_df = all_comm_time_df[all_comm_time_df['s_name'].str.contains(r'^send_backward(?:_\d+)?$')]
+                if len(send_backward_df) > 0:
+                    last_send_backward = send_backward_df.iloc[-1]
+                    theoretical_bubble_time += (
+                        stage_0_optimizer_step_start_ts - (last_send_backward['first_kernel_start'] + last_send_backward['kernel_span'])
+                    )
+            else:
+                if len(all_backward_steps_df) > 0:
+                    last_backward_step = all_backward_steps_df.iloc[-1]
+                    theoretical_bubble_time += (
+                        stage_0_optimizer_step_start_ts - (last_backward_step['first_kernel_start'] + last_backward_step['kernel_span'])
+                    )
+        return theoretical_bubble_time/1000
 
     def calculate_bubble_time_cooldown(self, all_comm_time_df, stage_id=None):
-        send_backward_index = all_comm_time_df[all_comm_time_df['s_name'].str.contains(r'^send_backward(?:_\d+)?$')].index
-        recv_backward_index = all_comm_time_df[all_comm_time_df['s_name'].str.contains(r'^recv_backward(?:_\d+)?$')].index
-        bubble_time_cooldown = all_comm_time_df.loc[send_backward_index, 'wait_time'].sum()/1000 + all_comm_time_df.loc[recv_backward_index, 'wait_time'].sum()/1000
-        return bubble_time_cooldown
+        return 0.0
 
-    def calculate_true_comm_and_overhead_wait_time(self, all_comm_time_df):
+    def calculate_true_comm(self, all_comm_time_df):
         comm_time_true = all_comm_time_df['comm_time'].sum()/1000
-        overhead_wait_time_total = all_comm_time_df['wait_time'].sum()/1000
-        return comm_time_true, overhead_wait_time_total
+        return comm_time_true
 
     # Todo: 'reduce_model_grads', 'step_', 'gather_model_params' 
     def calculate_optimizer_time(self, sorted_trace_df, bubble_time_final, stage_id, rank):

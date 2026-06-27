@@ -53,7 +53,7 @@ class CallGraph:
         "kernel_span",
     ]
 
-    def __init__(self, trace: Trace, ranks: Optional[List[int]] = None) -> None:
+    def __init__(self, trace: Trace, ranks: Optional[List[int]] = None, bwd_annotation_str: str = "## backward ##") -> None:
         """Construct a CallGraph object from a Trace object.
 
         Args:
@@ -71,6 +71,7 @@ class CallGraph:
         if (len(self.ranks)) == 0:
             raise ValueError("No rank was found for the trace.")
 
+        self.bwd_annotation_str = bwd_annotation_str
         self.rank_to_nodes: Dict[int, Dict[int, CallStackNode]] = {}
         self.rank_to_stacks: Dict[int, Dict[CallStackIdentity, CallStackGraph]] = {}
         self.call_stacks: List[CallStackGraph] = []
@@ -103,6 +104,7 @@ class CallGraph:
         df: pd.DataFrame,
         symbol_table: Optional[TraceSymbolTable] = None,
         rank: int = -1,
+        bwd_annotation_str: str = "## backward ##",
     ) -> "CallGraph":
         """Construct a CallGraph object from a DataFrame.
 
@@ -121,7 +123,7 @@ class CallGraph:
         t.traces[rank] = df.copy()
         t.is_parsed = True
 
-        cg = CallGraph(t)
+        cg = CallGraph(t, bwd_annotation_str=bwd_annotation_str)
         return cg
 
     def _construct_call_graph(self) -> None:
