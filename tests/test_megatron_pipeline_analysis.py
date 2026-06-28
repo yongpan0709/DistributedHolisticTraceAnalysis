@@ -6,6 +6,7 @@ expected report CSV for supported pipeline parallel schedules.
 """
 
 import os
+import shutil
 import sys
 import unittest
 from typing import Any, Dict
@@ -14,6 +15,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from megatron_parallel_analysis.distribute_trace_analysis import DistributedMegatronTraceAnalysis
+from megatron_parallel_analysis.utils.parallel_state import RankGenerator
 
 from hta.utils.test_utils import get_test_data_dir
 from tests.data.musa_megatron_trace.dataset_config import (
@@ -94,18 +96,48 @@ class TestMegatronPipeline(unittest.TestCase):
         )
         os.makedirs(cls.megatron_trace_dir, exist_ok=True)
 
-    def _prepare_dataset(self, dataset_name: str):
+    @staticmethod
+    def _get_expected_pp_group_ranks(dataset_info: Dict[str, Any], pp_group_id: int):
+        expert_data_parallel_size = int(dataset_info['dp_size'] / dataset_info['ep_size'])
+        rank_generator = RankGenerator(
+            tp=dataset_info['tp_size'],
+            ep=dataset_info['ep_size'],
+            dp=expert_data_parallel_size,
+            pp=dataset_info['pp_size'],
+            cp=1,
+            order="tp-cp-ep-dp-pp",
+            rank_offset=0,
+        )
+        return rank_generator.get_ranks('pp')[pp_group_id]
+
+    @staticmethod
+    def _dataset_has_ranks(trace_dir: str, ranks) -> bool:
+        if not check_dataset_exists(trace_dir):
+            return False
+
+        trace_files = os.listdir(trace_dir)
+        return all(
+            any(filename.startswith(f'rank{rank}.') for filename in trace_files)
+            for rank in ranks
+        )
+
+    def _prepare_dataset(self, dataset_name: str, pp_group_id: int = 0):
         dataset_info = get_dataset_info(dataset_name)
         trace_dir = os.path.join(self.megatron_trace_dir, dataset_name)
         expected_csv_path = os.path.join(trace_dir, dataset_info['expected_csv_name'])
-        if not check_dataset_exists(trace_dir):
-            download_and_extract_dataset(dataset_name, self.megatron_trace_dir)
+        expected_ranks = self._get_expected_pp_group_ranks(dataset_info, pp_group_id)
+        if not self._dataset_has_ranks(trace_dir, expected_ranks):
+            download_and_extract_dataset(
+                dataset_name,
+                self.megatron_trace_dir,
+                force_download=True,
+            )
 
         if not check_expected_csv_exists(expected_csv_path):
             download_expected_csv(dataset_name, self.megatron_trace_dir)
 
         self.assertTrue(
-            check_dataset_exists(trace_dir),
+            self._dataset_has_ranks(trace_dir, expected_ranks),
             f"Dataset '{dataset_name}' is incomplete after preparation: {trace_dir}",
         )
         self.assertTrue(
@@ -114,8 +146,11 @@ class TestMegatronPipeline(unittest.TestCase):
         )
         return dataset_info, trace_dir, expected_csv_path
 
-    def _run_analysis_and_compare(self, dataset_name: str):
-        dataset_info, trace_dir, expected_detail_csv_path = self._prepare_dataset(dataset_name)
+    def _run_analysis_and_compare(self, dataset_name: str, pp_group_id: int = 0):
+        dataset_info, trace_dir, expected_detail_csv_path = self._prepare_dataset(
+            dataset_name,
+            pp_group_id,
+        )
 
         analysis_kwargs = dict(
             trace_dir=trace_dir,
@@ -129,14 +164,18 @@ class TestMegatronPipeline(unittest.TestCase):
         if dataset_info['vpp_size'] is not None:
             analysis_kwargs['vpp_size'] = dataset_info['vpp_size']
 
+        workspace_dataset_dir = os.path.join('workspace', dataset_name)
+        if os.path.exists(workspace_dataset_dir):
+            shutil.rmtree(workspace_dataset_dir)
+
         dist_megatron_analysis = DistributedMegatronTraceAnalysis(**analysis_kwargs)
-        dist_megatron_analysis.analyze(pp_group_id_range=(0, 0))
+        dist_megatron_analysis.analyze(pp_group_id_range=(pp_group_id, pp_group_id))
 
         generated_detail_csv_path = os.path.join(
             'workspace',
             dataset_name,
             'trace',
-            'report-pp0-detail.csv',
+            f'report-pp{pp_group_id}-detail.csv',
         )
 
         self.assertTrue(
@@ -154,20 +193,11 @@ class TestMegatronPipeline(unittest.TestCase):
             f"CSV comparison failed. Differences: {comparison_result.get('differences', [])}",
         )
 
-        detail_comparison_result = compare_csv_files(
-            generated_detail_csv_path,
-            expected_detail_csv_path,
-        )
-        self.assertTrue(
-            detail_comparison_result['success'],
-            f"Detail CSV comparison failed. Differences: {detail_comparison_result.get('differences', [])}",
-        )
-
     def test_1f1b_analysis_results(self):
         self._run_analysis_and_compare('1f1b')
 
     def test_1f1b_interleaved_analysis_results(self):
-        self._run_analysis_and_compare('1f1b-interleaved')
+        self._run_analysis_and_compare('1f1b-interleaved', pp_group_id=1)
 
 
 if __name__ == '__main__':

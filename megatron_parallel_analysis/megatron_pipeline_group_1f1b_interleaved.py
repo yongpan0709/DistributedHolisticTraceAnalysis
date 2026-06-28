@@ -4,7 +4,7 @@
 from typing import Dict, Optional
 
 import pandas as pd
-
+import json
 from hta.common.trace_filter import NameFilter
 from hta.configs.config import logger
 from hta.configs.default_values import DEFAULT_TRACE_DIR
@@ -94,6 +94,8 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             'logical_and_across_model_parallel_group',
             'reduce_max_stat_across_model_parallel_group',
             'should_run_forward_backward',
+            'mccl:reduce_scatter_tensor_coalesced',
+            'mccl:all_reduce',
         ]
         filter_comm = NameFilter(create_regex_for_full_match(comm_names_list))
         return filter_comm(trace_df)
@@ -186,27 +188,75 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         bwd_step_in_steady = bwd_step.index[:-num_warmup_microbatches]
         return bwd_step.loc[bwd_step_in_steady, 'idle_interval'].sum()/1000 + fwd_step.loc[fwd_step_in_steady, 'idle_interval'].sum()/1000
     
-    def calculate_theoretical_bubble_time_cooldown(self, all_comm_time_df, stage_id):
+    # Todo: update this function, since currently we cannot accurately get the idle interval because send-recv by mooncake. Also, cannot calculate the send ts of last send_backward_recv_backward
+    def calculate_theoretical_bubble_time_cooldown(self, all_comm_time_df, all_backward_steps_df, stage_id, stage_0_optimizer_step_start_ts=None):
         num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
         if stage_id == self.pipeline_parallel_size-1:
-            return 0.0
+            theoretical_bubble_time = 0.0
         else:
             bwd_index = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^backward_step$')].index
             if len(bwd_index) > 0:
                 bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches:]
-                return all_comm_time_df.loc[bwd_step_in_cooldown[:self.pipeline_parallel_size-stage_id-1], 'idle_interval'].sum()/1000
+                theoretical_bubble_time = all_comm_time_df.loc[
+                    bwd_step_in_cooldown[:self.pipeline_parallel_size-stage_id-1], 'idle_interval'
+                ].sum()
             else:
-                return 0.0
-        
+                theoretical_bubble_time = 0.0
+
+        if stage_0_optimizer_step_start_ts is not None:
+            if stage_id != 0:
+                bwd_step_df = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^backward_step$')]
+                if len(bwd_step_df) > 0:
+                    last_backward_step = bwd_step_df.iloc[-1]
+                    theoretical_bubble_time += (
+                        stage_0_optimizer_step_start_ts - (last_backward_step['first_kernel_start'] + last_backward_step['kernel_span'])
+                    )
+            else:
+                if len(all_backward_steps_df) > 0:
+                    last_backward_step = all_backward_steps_df.iloc[-1]
+                    theoretical_bubble_time += (
+                        stage_0_optimizer_step_start_ts - (last_backward_step['first_kernel_start'] + last_backward_step['kernel_span'])
+                    )
+
+        return theoretical_bubble_time/1000
+
     def calculate_bubble_time_cooldown(self, all_comm_time_df, stage_id):
         num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
         bwd_index = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^backward_step$')].index
-        bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches:]
+        bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches+(self.pipeline_parallel_size - stage_id - 1):]
         return all_comm_time_df.loc[bwd_step_in_cooldown, 'idle_interval'].sum()/1000
 
     # Todo: using mooncake, cannot get the accurate comm time and wait time
-    def calculate_true_comm_and_overhead_wait_time(self, all_comm_time_df):
-        return 0.0, 0.0
+    def calculate_true_comm(self, all_comm_time_df):
+        return 0.0
     
     def get_bubble_time_ratio_theoretical(self, num_microbatch):
         return (self.pipeline_parallel_size - 1) / num_microbatch / self.vpp_size
+
+    # Todo: 增加 fwd step和bwd step batch num and flow
+    def save_trace_df_to_file(self, df: pd.DataFrame, output_file: str, trace_df_p2p_comm_flow: pd.DataFrame=None, meta_data: dict=None, pp_schedule: str='1f1b'):
+        columns_to_keep = ['name', 'cat', 'pid', 'tid', 'ts', 'dur', 'rank']
+        columns_to_drop = ['s_name', 's_cat']
+        
+        new_df = df[columns_to_keep].copy()
+        new_df['ts'] = df['first_kernel_start'].where(df['first_kernel_start'] > 0, df['ts'])
+        new_df['dur'] = df['kernel_span'].where(df['kernel_span'] > 0, df['dur'])
+        new_df['name'] = df['s_name']
+        new_df['cat'] = df['s_cat']
+        new_df['ph'] = 'X'
+        # Todo: in interleaved PP, send_fwd_recv_fwd and send_bwd_recv_bwd execute asyn and in parallel with fwd_step or bwd_step
+        # so for displaying in perfetto, it muse set them with different tids.
+        new_df.loc[new_df['name'].str.match(pat=r"^(send_forward_recv_forward|send_backward_recv_backward)$"), 'tid'] = 1
+        new_df.loc[new_df['name'].str.match(pat=r"recv_forward$"), 'tid'] = 1
+        new_df.loc[new_df['name'].str.match(pat=r"^mccl:reduce_scatter_tensor_coalesced$"), 'tid'] = 1
+        new_df.loc[new_df['name'].str.match(pat=r"^mccl:all_reduce$"), 'tid'] = 1
+        new_df['args'] = df.apply(lambda row: {col: row[col] for col in row.index if col not in columns_to_keep + columns_to_drop}, axis=1)
+
+        trace_data = meta_data.copy() if meta_data is not None else {}
+        trace_events = new_df.to_dict('records')
+        #flow_events = convert_to_flow_events(trace_df_p2p_comm_flow)
+        metadata_events = MegatronPipelineParallelGroupTraceBase.generate_metadata_events([tuple(x) for x in new_df[['rank', 'pid']].drop_duplicates().to_records(index=False)])
+        trace_data["traceEvents"] = trace_events + metadata_events
+        
+        with open(output_file, 'w') as f:
+            json.dump(trace_data, f, indent=4)
