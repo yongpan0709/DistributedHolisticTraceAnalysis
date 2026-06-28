@@ -3,6 +3,7 @@ import json
 import os
 import re
 from copy import deepcopy
+from functools import partial
 
 from megatron_parallel_analysis.distribute_trace_analysis import (
     DistributedMegatronTraceAnalysis,
@@ -56,8 +57,18 @@ FILTER_OUT_CAT_FUNCS = [
     "gpu_user_annotation",
 ]
 
+FILTER_OUT_FUNCS_FOR_EPOVERLAP = [
+    r"Memcpy1 DtoH \(Device -> Pinned\)"
+]
 
-def filter_out_funcs(file_path, redirect_new_trace_path):
+FILTER_OUT_FUNCS_FOR_EPOVERLAP_PATTERN = "|".join(FILTER_OUT_FUNCS_FOR_EPOVERLAP)
+
+def filter_out_funcs(
+    file_path,
+    redirect_new_trace_path,
+    combined_pattern=COMBINED_PATTERN,
+    mooncake_p2p_pattern=MOONCAKE_P2P_PATTERN,
+):
     print(f"redirect_new_trace_path: {redirect_new_trace_path}")
     #fix_json_value_missing(file_path)
     with open(file_path, "r", encoding="utf-8") as file:
@@ -69,9 +80,9 @@ def filter_out_funcs(file_path, redirect_new_trace_path):
             dup_data.setdefault("traceEvents", [])
             for item in value:
                 if "name" in item:
-                    if re.match(COMBINED_PATTERN, item["name"]):
+                    if re.match(combined_pattern, item["name"]):
                         continue
-                    if re.match(MOONCAKE_P2P_PATTERN, item["name"]):
+                    if re.match(mooncake_p2p_pattern, item["name"]):
                         item["cat"] = "user_annotation"
                 dup_data["traceEvents"].append(deepcopy(item))
         else:
@@ -102,6 +113,12 @@ if __name__ == "__main__":
     parser.add_argument("--pp", type=int, required=True, help="pp size")
     parser.add_argument("--dp", type=int, required=True, help="dp size")
     parser.add_argument("--ep", type=int, required=True, help="ep size")
+    parser.add_argument(
+        "--pp-schedule",
+        choices=["1f1b", "1f1b-interleaved", "1f1b-interleaved-epoverlap"],
+        default="1f1b",
+        help="pipeline parallel schedule",
+    )
     args = parser.parse_args()
 
     trace_dir = args.trace_dir.rstrip("/")
@@ -111,4 +128,15 @@ if __name__ == "__main__":
     dist_megatron_analysis = DistributedMegatronTraceAnalysis(
         trace_dir, args.tp, args.ep, args.dp, args.pp
     )
-    dist_megatron_analysis.pp_etl(redirect_path, filter_out_funcs)
+    combined_pattern = COMBINED_PATTERN
+    mooncake_p2p_pattern = MOONCAKE_P2P_PATTERN
+    if args.pp_schedule == "1f1b-interleaved-epoverlap":
+        combined_pattern = "|".join(
+            [combined_pattern, FILTER_OUT_FUNCS_FOR_EPOVERLAP_PATTERN]
+        )
+    filter_out_funcs_with_pattern = partial(
+        filter_out_funcs,
+        combined_pattern=combined_pattern,
+        mooncake_p2p_pattern=mooncake_p2p_pattern,
+    )
+    dist_megatron_analysis.pp_etl(redirect_path, filter_out_funcs_with_pattern)
