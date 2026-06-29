@@ -142,7 +142,7 @@ class CallStackIdentity(NamedTuple):
     tid: int = -1
 
 
-@dataclass
+@dataclass(slots=True)
 class CallStackNode:
     """An object which captures the connections between entities in the traces.
 
@@ -163,7 +163,7 @@ class CallStackNode:
     depth: int = -1
     height: int = -1
     device: DeviceType = DeviceType.CPU
-    children: List[int] = field(default_factory=lambda: [])
+    children: List[int] = field(default_factory=list)
 
 
 DFSCallback = Callable[[int, CallStackNode], None]
@@ -362,7 +362,7 @@ class CallStackGraph:
         if not is_events_sorted(events):
             logger.fatal("BUG: the events array is not sorted.")
             raise SystemError("BUG: the events array is not sorted.")
-        if len(set(map(tuple, events))) != len(events):
+        if len(events) > 1 and (events[1:] == events[:-1]).all(axis=1).any():
             logger.error("BUG: the sorted array contains duplicates")
 
         stack: List[int] = []
