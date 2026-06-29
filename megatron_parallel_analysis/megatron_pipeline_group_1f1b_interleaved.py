@@ -52,10 +52,14 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
     def set_vpp_stage_id(self, trace_df: pd.DataFrame, stage_id: int) -> None:
         trace_df.sort_values(by=['ts', 'dur'], ascending=[True, False], inplace=True)
         trace_df['vpp_stage_id'] = 0
+        trace_df['micro_batch_id'] = -1
         num_microbatches = self.get_num_microbatches()
         num_warmup_microbatches = get_pp_rank_microbatches(num_microbatches, self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
         schedule_table = get_schedule_table(num_microbatches, self.vpp_size, self.pipeline_parallel_size)
+        micro_batch_order, _ = zip(*schedule_table)
         fwd_order, bwd_order, _ = convert_schedule_table_to_order(num_warmup_microbatches, self.vpp_size, schedule_table)
+        trace_df.loc[trace_df['s_name'].str.match(pat=r'^forward_step$'), 'micro_batch_id'] = micro_batch_order
+        trace_df.loc[trace_df['s_name'].str.match(pat=r'^backward_step$'), 'micro_batch_id'] = micro_batch_order
         trace_df.loc[trace_df['s_name'].str.match(pat=r'^forward_step$'), 'vpp_stage_id'] = fwd_order
         trace_df.loc[trace_df['s_name'].str.match(pat=r'^backward_step$'), 'vpp_stage_id'] = bwd_order
 
@@ -94,8 +98,8 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             'logical_and_across_model_parallel_group',
             'reduce_max_stat_across_model_parallel_group',
             'should_run_forward_backward',
-            'mccl:reduce_scatter_tensor_coalesced',
-            'mccl:all_reduce',
+            # 'mccl:reduce_scatter_tensor_coalesced',
+            # 'mccl:all_reduce',
         ]
         filter_comm = NameFilter(create_regex_for_full_match(comm_names_list))
         return filter_comm(trace_df)
@@ -233,6 +237,16 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
     def get_bubble_time_ratio_theoretical(self, num_microbatch):
         return (self.pipeline_parallel_size - 1) / num_microbatch / self.vpp_size
 
+    @staticmethod
+    def format_step_trace_name(row: pd.Series) -> str:
+        if row['s_name'] not in ('forward_step', 'backward_step'):
+            return row['s_name']
+        micro_batch_id = row.get('micro_batch_id', -1)
+        vpp_stage_id = row.get('vpp_stage_id', 0)
+        if pd.isna(micro_batch_id) or int(micro_batch_id) < 0:
+            return row['s_name']
+        return f"{row['s_name']}_mb{int(micro_batch_id)}_vpp{abs(int(vpp_stage_id))}"
+
     # Todo: 增加 fwd step和bwd step batch num and flow
     def save_trace_df_to_file(self, df: pd.DataFrame, output_file: str, trace_df_p2p_comm_flow: pd.DataFrame=None, meta_data: dict=None, pp_schedule: str='1f1b'):
         columns_to_keep = ['name', 'cat', 'pid', 'tid', 'ts', 'dur', 'rank']
@@ -241,7 +255,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         new_df = df[columns_to_keep].copy()
         new_df['ts'] = df['first_kernel_start'].where(df['first_kernel_start'] > 0, df['ts'])
         new_df['dur'] = df['kernel_span'].where(df['kernel_span'] > 0, df['dur'])
-        new_df['name'] = df['s_name']
+        new_df['name'] = df.apply(self.format_step_trace_name, axis=1)
         new_df['cat'] = df['s_cat']
         new_df['ph'] = 'X'
         # Todo: in interleaved PP, send_fwd_recv_fwd and send_bwd_recv_bwd execute asyn and in parallel with fwd_step or bwd_step
