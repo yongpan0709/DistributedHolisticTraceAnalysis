@@ -1,7 +1,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 import os
 import logging
 import pickle
@@ -112,6 +113,20 @@ class DistributedMegatronTraceAnalysis:
     multiple processes.
     """
     
+    @staticmethod
+    def _get_expert_data_parallel_size(dp: int, ep: int) -> int:
+        if dp <= 0 or ep <= 0:
+            raise ValueError(
+                f'Data parallel size and expert parallel size must be positive; '
+                f'got DP={dp}, EP={ep}'
+            )
+        if dp % ep != 0:
+            raise ValueError(
+                f'Total data parallel size must be divisible by expert parallel size; '
+                f'got DP={dp}, EP={ep}'
+            )
+        return dp // ep
+
     def __init__(
         self, 
         trace_dir: str, 
@@ -145,12 +160,13 @@ class DistributedMegatronTraceAnalysis:
         self.pipeline_parallel_size = pp
         self.expert_model_parallel_size = ep
         self.context_parallel_size = cp
-        edp = int(dp/ep)
+        edp = self._get_expert_data_parallel_size(dp, ep)
         self.expert_data_parallel_size = edp
         assert pp_schedule in ['1f1b', '1f1b-interleaved', '1f1b-interleaved-epoverlap'], \
             f'Invalid pp schedule: {pp_schedule}'
         self.pp_schedule = pp_schedule
-        
+        self.order = order
+
         if pp_schedule in ['1f1b-interleaved', '1f1b-interleaved-epoverlap']:
             self.vpp_size = vpp_size
             assert self.vpp_size > 0, f'Invalid vpp size: {self.vpp_size}'
@@ -168,7 +184,8 @@ class DistributedMegatronTraceAnalysis:
         self.all_data_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('dp')
         self.all_tensor_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('tp')
         self.all_pipeline_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('pp')
-        
+        self.all_expert_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('ep')
+
         self.assigned_tasks = []
         self.analysis_list = []
         self.total_analysis_lists = None
@@ -186,6 +203,8 @@ class DistributedMegatronTraceAnalysis:
         self.workspace_dir = 'workspace'
         self.workname = os.path.basename(self.trace_dir)
         self.trace_dir_pp_group = os.path.join(self.workspace_dir, self.workname, 'trace')
+        self.ep_group_stats_dir = os.path.join(self.trace_dir_pp_group, 'ep_group_stats')
+        self.ep_trace_dir = os.path.join(self.trace_dir_pp_group, 'ep_trace')
         self.output_dir = os.path.join(self.workspace_dir, self.workname, 'output')
         self.stragglers_dir = os.path.join(self.output_dir, 'stragglers')
         self.log_dir = os.path.join(self.workspace_dir, self.workname, 'log')
@@ -267,6 +286,7 @@ class DistributedMegatronTraceAnalysis:
                 pp=self.pipeline_parallel_size,
                 ep=self.expert_model_parallel_size,
                 cp=self.context_parallel_size,
+                order=self.order,
                 micro_bs = self.micro_bs
             )
         elif self.pp_schedule == '1f1b-interleaved':
@@ -278,6 +298,7 @@ class DistributedMegatronTraceAnalysis:
                 pp=self.pipeline_parallel_size,
                 ep=self.expert_model_parallel_size,
                 cp=self.context_parallel_size,
+                order=self.order,
                 vpp_size=self.vpp_size,
                 micro_bs = self.micro_bs
             )
@@ -290,6 +311,7 @@ class DistributedMegatronTraceAnalysis:
                 pp=self.pipeline_parallel_size,
                 ep=self.expert_model_parallel_size,
                 cp=self.context_parallel_size,
+                order=self.order,
                 vpp_size=self.vpp_size,
                 micro_bs = self.micro_bs
             )
