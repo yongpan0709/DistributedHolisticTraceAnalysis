@@ -230,6 +230,9 @@ class DistributedMegatronTraceAnalysis:
         self.log_dir = os.path.join(self.workspace_dir, self.workname, 'log')
         if self.rank == 0:
             prepare_directory(self.trace_dir_pp_group, force_clear=False)
+            if self._should_analyze_ep():
+                prepare_directory(self.ep_group_stats_dir, force_clear=True)
+                prepare_directory(self.ep_trace_dir, force_clear=True)
             prepare_directory(self.log_dir, force_clear=True)
             prepare_directory(self.output_dir, force_clear=True)
             prepare_directory(self.stragglers_dir, force_clear=True)
@@ -402,6 +405,22 @@ class DistributedMegatronTraceAnalysis:
         pipeline_trace = self.analyze_pipeline_parallel_per_group(pp_group_id, trace_dir)
         
         return pipeline_trace
+
+    def _validate_pp_group_id_range(self, pp_group_id_range):
+        if pp_group_id_range is None:
+            return set(range(len(self.all_pipeline_parallel_group_ranks)))
+        start_pp_group_id, end_pp_group_id = pp_group_id_range
+        if (
+            start_pp_group_id < 0
+            or start_pp_group_id > end_pp_group_id
+            or end_pp_group_id >= len(self.all_pipeline_parallel_group_ranks)
+        ):
+            raise ValueError(
+                f'Invalid PP group range {pp_group_id_range}; valid IDs are '
+                f'0..{len(self.all_pipeline_parallel_group_ranks) - 1}'
+            )
+        # Todo: set()
+        return set(range(start_pp_group_id, end_pp_group_id + 1))
 
     def analyze(self, pp_group_id_range: Optional[Tuple[int, int]] = None):
         """Execute analysis on assigned tasks.
