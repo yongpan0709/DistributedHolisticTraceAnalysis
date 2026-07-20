@@ -429,13 +429,12 @@ class DistributedMegatronTraceAnalysis:
             pp_group_id_range: Optional inclusive pp_group_id range, e.g. (0, 3).
         """
         self.analysis_list = []
-        assigned_tasks = self.assigned_tasks
-        if pp_group_id_range is not None:
-            start_pp_group_id, end_pp_group_id = pp_group_id_range
+        selected_pp_group_ids = self._validate_pp_group_id_range(pp_group_id_range)
+        if selected_pp_group_ids is not None:
             assigned_tasks = [
                 (pp_group_id, folder)
-                for pp_group_id, folder in assigned_tasks
-                if start_pp_group_id <= pp_group_id <= end_pp_group_id
+                for pp_group_id, folder in self.assigned_tasks
+                if pp_group_id in selected_pp_group_ids
             ]
 
         for pp_group_id, folder in assigned_tasks:
@@ -771,12 +770,14 @@ class DistributedMegatronTraceAnalysis:
     def pp_etl(self, target_trace_dir: str, filter_out_funcs):
         """
         ETL for all assigned pipeline parallel groups.
-        
+
         Args:
             target_trace_dir: Target trace directory
             filter_out_funcs: Functions to filter out traces
         """
-        for pp_group_id, _ in self.assigned_tasks:
+        tasks = list(enumerate(self.all_pp_group_sub_dirs))
+        assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
+        for pp_group_id, _ in assigned_tasks:
             logger.info(f'ETL pp group {pp_group_id}')
             self.etl_single_pp_group(pp_group_id, target_trace_dir, filter_out_funcs)
 
