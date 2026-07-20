@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 import os
 import logging
+import math
 import pickle
 import shutil
 import time
@@ -198,6 +199,25 @@ class DistributedMegatronTraceAnalysis:
         self.init_pp_group_sub_dirs()
         self.assign_analysis_tasks()
 
+    def _should_analyze_ep(self):
+        """Return whether EP timing data should be collected and analyzed."""
+        return (
+            self.expert_model_parallel_size > 1
+            and self.pp_schedule in ('1f1b', '1f1b-interleaved')
+        )
+
+    @staticmethod
+    def _tasks_for_worker(tasks, worker_rank, world_size):
+        num_tasks_per_process, remainder = divmod(len(tasks), world_size)
+        if worker_rank < remainder:
+            start_index = worker_rank * (num_tasks_per_process + 1)
+            end_index = start_index + num_tasks_per_process + 1
+        else:
+            start_index = remainder * (num_tasks_per_process + 1) + \
+                         (worker_rank - remainder) * num_tasks_per_process
+            end_index = start_index + num_tasks_per_process
+        return tasks[start_index:end_index]
+
     def setup_dirs(self):
         """Setup directory structure for analysis."""
         self.workspace_dir = 'workspace'
@@ -248,23 +268,10 @@ class DistributedMegatronTraceAnalysis:
         logger.info('Initialization of pipeline parallel group subdirectories completed.')
 
     def assign_analysis_tasks(self):
-        """Assign analysis tasks to processes."""
+        """Assign PP groups or complete EP bundles to MPI workers."""
         logger.info('Assigning analysis tasks.')
-        num_folders = len(self.all_pp_group_sub_dirs)
-        num_folders_per_process = num_folders // self.world_size
-        remainder = num_folders % self.world_size
-
-        if self.rank < remainder:
-            start_index = self.rank * (num_folders_per_process + 1)
-            end_index = start_index + num_folders_per_process + 1
-        else:
-            start_index = remainder * (num_folders_per_process + 1) + \
-                         (self.rank - remainder) * num_folders_per_process
-            end_index = start_index + num_folders_per_process
-
-        for i in range(start_index, end_index):
-            self.assigned_tasks.append((i, self.all_pp_group_sub_dirs[i]))
-        
+        tasks = list(enumerate(self.all_pp_group_sub_dirs))
+        self.assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
         logger.info(f'Assigned tasks: {self.assigned_tasks}')
 
     def _create_pipeline_trace(self, trace_dir: str):
