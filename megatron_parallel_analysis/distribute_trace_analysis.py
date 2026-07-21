@@ -139,7 +139,9 @@ class DistributedMegatronTraceAnalysis:
         pp_schedule: str = '1f1b', 
         vpp_size: int = 2, 
         micro_bs = 0,
-        order: str = "tp-cp-ep-dp-pp"
+        order: str = "tp-cp-ep-dp-pp",
+        enable_ep_analysis: bool = False,
+        rebuild_parse_cache: bool = False,
     ):
         """
         Initialize the distributed trace analyzer.
@@ -161,6 +163,7 @@ class DistributedMegatronTraceAnalysis:
         self.pipeline_parallel_size = pp
         self.expert_model_parallel_size = ep
         self.context_parallel_size = cp
+        self.enable_ep_analysis = enable_ep_analysis
         edp = self._get_expert_data_parallel_size(dp, ep)
         self.expert_data_parallel_size = edp
         assert pp_schedule in ['1f1b', '1f1b-interleaved', '1f1b-interleaved-epoverlap'], \
@@ -174,6 +177,7 @@ class DistributedMegatronTraceAnalysis:
         else:
             self.vpp_size = None
         self.micro_bs = micro_bs
+        self.rebuild_parse_cache = rebuild_parse_cache
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.Get_rank()
         self.world_size = self.comm.Get_size()
@@ -186,7 +190,7 @@ class DistributedMegatronTraceAnalysis:
         self.all_tensor_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('tp')
         self.all_pipeline_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('pp')
         self.all_expert_parallel_group_ranks = self.expert_decoder_rank_generator.get_ranks('ep')
-
+        self.source_pp_ep_group_bundles = self._build_source_pp_ep_group_bundles() if self._should_analyze_ep() else []
         self.assigned_tasks = []
         self.analysis_list = []
         self.total_analysis_lists = None
@@ -202,9 +206,50 @@ class DistributedMegatronTraceAnalysis:
     def _should_analyze_ep(self):
         """Return whether EP timing data should be collected and analyzed."""
         return (
-            self.expert_model_parallel_size > 1
+            self.enable_ep_analysis
+            and self.expert_model_parallel_size > 1
             and self.pp_schedule in ('1f1b', '1f1b-interleaved')
         )
+
+    def _build_source_pp_ep_group_bundles(self):
+        """Map EP groups to their source PP groups without assuming rank arithmetic."""
+        rank_to_pp_location = {}
+        for pp_group_id, ranks in enumerate(self.all_pipeline_parallel_group_ranks):
+            for pp_stage_id, rank in enumerate(ranks):
+                if rank in rank_to_pp_location:
+                    raise ValueError(f'Rank {rank} occurs in multiple PP groups')
+                rank_to_pp_location[rank] = (pp_group_id, pp_stage_id)
+
+        grouped_descriptors = defaultdict(list)
+        for ep_group_id, ranks in enumerate(self.all_expert_parallel_group_ranks):
+            if len(ranks) != self.expert_model_parallel_size or len(set(ranks)) != len(ranks):
+                raise ValueError(f'Invalid ranks for EP group {ep_group_id}: {ranks}')
+            try:
+                locations = [rank_to_pp_location[rank] for rank in ranks]
+            except KeyError as error:
+                raise ValueError(f'EP group {ep_group_id} contains unknown rank {error.args[0]}') from error
+            pp_stage_ids = {location[1] for location in locations}
+            source_pp_group_ids = tuple(sorted(location[0] for location in locations))
+            if len(pp_stage_ids) != 1 or len(set(source_pp_group_ids)) != self.expert_model_parallel_size:
+                raise ValueError(
+                    f'EP group {ep_group_id} does not map to one PP stage and '
+                    f'{self.expert_model_parallel_size} source PP groups: {locations}'
+                )
+            descriptor = {
+                'ep_group_id': ep_group_id,
+                'pp_stage_id': pp_stage_ids.pop(),
+                'ranks': tuple(ranks),
+                'source_pp_group_ids': source_pp_group_ids,
+            }
+            grouped_descriptors[source_pp_group_ids].append(descriptor)
+
+        return [
+            {
+                'source_pp_group_ids': source_pp_group_ids,
+                'ep_groups': tuple(sorted(descriptors, key=lambda item: item['pp_stage_id'])),
+            }
+            for source_pp_group_ids, descriptors in sorted(grouped_descriptors.items())
+        ]
 
     @staticmethod
     def _tasks_for_worker(tasks, worker_rank, world_size):
@@ -228,6 +273,7 @@ class DistributedMegatronTraceAnalysis:
         self.output_dir = os.path.join(self.workspace_dir, self.workname, 'output')
         self.stragglers_dir = os.path.join(self.output_dir, 'stragglers')
         self.log_dir = os.path.join(self.workspace_dir, self.workname, 'log')
+        self.parse_cache_dir = os.path.join(self.workspace_dir, self.workname, 'cache')
         if self.rank == 0:
             prepare_directory(self.trace_dir_pp_group, force_clear=False)
             if self._should_analyze_ep():
@@ -236,6 +282,7 @@ class DistributedMegatronTraceAnalysis:
             prepare_directory(self.log_dir, force_clear=True)
             prepare_directory(self.output_dir, force_clear=True)
             prepare_directory(self.stragglers_dir, force_clear=True)
+            prepare_directory(self.parse_cache_dir, force_clear=False)
         self.comm.Barrier()
         time.sleep(3)
 
@@ -273,8 +320,13 @@ class DistributedMegatronTraceAnalysis:
     def assign_analysis_tasks(self):
         """Assign PP groups or complete EP bundles to MPI workers."""
         logger.info('Assigning analysis tasks.')
-        tasks = list(enumerate(self.all_pp_group_sub_dirs))
-        self.assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
+        if self._should_analyze_ep():
+            self.assigned_tasks = self._tasks_for_worker(
+                self.source_pp_ep_group_bundles, self.rank, self.world_size
+            )
+        else:
+            tasks = list(enumerate(self.all_pp_group_sub_dirs))
+            self.assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
         logger.info(f'Assigned tasks: {self.assigned_tasks}')
 
     def _create_pipeline_trace(self, trace_dir: str):
@@ -343,7 +395,11 @@ class DistributedMegatronTraceAnalysis:
         
         # Create pipeline trace object
         pipeline_trace = self._create_pipeline_trace(trace_dir)
-        
+        # pipeline_trace.configure_parse_cache(
+        #     cache_dir=self.parse_cache_dir,
+        #     rebuild=self.rebuild_parse_cache,
+        # )
+
         # Parse traces per PP group
         logger.info('Construct CallGraph for traces')
         pipeline_trace.parse_traces_per_pp_group(pp_group_id=pp_group_id)
@@ -376,19 +432,6 @@ class DistributedMegatronTraceAnalysis:
         
         return pipeline_trace
 
-    def load_trace_analyzer(self, trace_dir):
-        cache_path = os.path.join(trace_dir, 'analyzer_cache.pkl')
-        if os.path.exists(cache_path):
-            with open(cache_path, 'rb') as f:
-                analyzer = pickle.load(f)
-            logger.info(f'Analyzer loaded from {cache_path}')
-        else:
-            analyzer = MegatronPipelineParallelGroupTraceAnalysis(trace_dir=trace_dir, data_parallel_size=self.data_parallel_size, tensor_parallel_size=self.tensor_parallel_size, pipeline_parallel_size=self.pipeline_parallel_size, expert_model_parallel_size=self.expert_model_parallel_size, context_parallel_size=self.context_parallel_size, pp_schedule = self.pp_schedule, vpp_size = self.vpp_size, micro_bs=self.micro_bs)
-            with open(cache_path, 'wb') as f:
-                pickle.dump(analyzer, f)
-            logger.info(f'Analyzer saved to {cache_path}')
-        return analyzer
-    
     def process_single_pp_group(self, pp_group_id: int, trace_dir: str):
         """
         Process a single pipeline parallel group.
@@ -406,6 +449,43 @@ class DistributedMegatronTraceAnalysis:
         
         return pipeline_trace
 
+    def _validate_and_select_ep_bundles(self, selected_pp_group_ids, pp_group_id_range):
+        """Select only complete EP bundles covered by the requested PP IDs."""
+        if pp_group_id_range is None:
+            return list(self.source_pp_ep_group_bundles)
+
+        selected_bundles = []
+        for bundle in self.source_pp_ep_group_bundles:
+            source_ids = set(bundle['source_pp_group_ids'])
+            covered_ids = source_ids.intersection(selected_pp_group_ids)
+            if not covered_ids:
+                continue
+            if covered_ids != source_ids:
+                missing_ids = sorted(source_ids.difference(covered_ids))
+                raise ValueError(
+                    f'PP group range {pp_group_id_range} partially overlaps EP group '
+                    f'{bundle["source_pp_group_ids"]}: covered '
+                    f'{sorted(covered_ids)}, missing {missing_ids}. '
+                    'EP analysis requires complete bundle coverage.'
+                )
+            selected_bundles.append(bundle)
+        if not selected_bundles:
+            raise ValueError(
+                f'PP group range {pp_group_id_range} does not cover any complete EP bundle.'
+            )
+        return selected_bundles
+
+    def _assign_tasks_for_selection(self, selected_pp_group_ids, selected_bundles=None):
+        if self._should_analyze_ep():
+            tasks = self.source_pp_ep_group_bundles if selected_bundles is None else selected_bundles
+        else:
+            tasks = [
+                (pp_group_id, self.all_pp_group_sub_dirs[pp_group_id])
+                for pp_group_id in sorted(selected_pp_group_ids)
+            ]
+        self.assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
+        logger.info('Assigned tasks: %s', self.assigned_tasks)
+
     def _validate_pp_group_id_range(self, pp_group_id_range):
         if pp_group_id_range is None:
             return set(range(len(self.all_pipeline_parallel_group_ranks)))
@@ -419,7 +499,6 @@ class DistributedMegatronTraceAnalysis:
                 f'Invalid PP group range {pp_group_id_range}; valid IDs are '
                 f'0..{len(self.all_pipeline_parallel_group_ranks) - 1}'
             )
-        # Todo: set()
         return set(range(start_pp_group_id, end_pp_group_id + 1))
 
     def analyze(self, pp_group_id_range: Optional[Tuple[int, int]] = None):
@@ -430,22 +509,23 @@ class DistributedMegatronTraceAnalysis:
         """
         self.analysis_list = []
         selected_pp_group_ids = self._validate_pp_group_id_range(pp_group_id_range)
-        if selected_pp_group_ids is not None:
-            assigned_tasks = [
-                (pp_group_id, folder)
-                for pp_group_id, folder in self.assigned_tasks
-                if pp_group_id in selected_pp_group_ids
-            ]
-
-        for pp_group_id, folder in assigned_tasks:
-            logger.debug(f'Processing pp group {pp_group_id}')
-            result = self.process_single_pp_group(pp_group_id, folder)
-            self.analysis_list.append(result)
-        
-        # Note: Uncomment the following lines to enable full distributed analysis
-        # self.gather_infos_from_all_ranks()
-        # self.analyze_anomalies()
-        # self.post_process()
+        if self._should_analyze_ep():
+            selected_bundles = self._validate_and_select_ep_bundles(
+                selected_pp_group_ids,
+                pp_group_id_range,
+            )
+            self._assign_tasks_for_selection(
+                selected_pp_group_ids,
+                selected_bundles,
+            )
+            # for bundle in self.assigned_tasks:
+            #     self._process_ep_bundle(bundle)
+        else:
+            self._assign_tasks_for_selection(selected_pp_group_ids)
+            for pp_group_id, folder in self.assigned_tasks:
+                logger.debug(f'Processing pp group {pp_group_id}')
+                result = self.process_single_pp_group(pp_group_id, folder)
+                self.analysis_list.append(result)
 
     def gather_infos_from_all_ranks(self):
         """Gather analysis results from all ranks to root process."""
