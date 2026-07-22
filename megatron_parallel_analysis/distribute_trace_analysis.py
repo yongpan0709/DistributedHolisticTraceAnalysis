@@ -506,16 +506,16 @@ class DistributedMegatronTraceAnalysis:
     @staticmethod
     def _timeline_stat_columns(event_name):
         return (
-            f'{event_name}_start_min_us',
-            f'{event_name}_start_max_us',
-            f'{event_name}_duration_min_us',
-            f'{event_name}_duration_max_us',
-            f'{event_name}_duration_mean_us',
-            f'{event_name}_duration_std_us',
+            f'{event_name}_start_min_ms',
+            f'{event_name}_start_max_ms',
+            f'{event_name}_duration_min_ms',
+            f'{event_name}_duration_max_ms',
+            f'{event_name}_duration_mean_ms',
+            f'{event_name}_duration_std_ms',
         )
 
     def _write_ep_group_stats_csv(self, descriptor, timelines_by_rank):
-        """Write cross-rank GPU timing statistics for each micro-batch.
+        """Write cross-rank GPU timing statistics in milliseconds per micro-batch.
 
         Each row represents one micro-batch.  Every event is aggregated over
         all ranks in the EP descriptor.  The timeline extractors define the
@@ -605,13 +605,16 @@ class DistributedMegatronTraceAnalysis:
                 )
                 row.update(dict(zip(
                     self._timeline_stat_columns(event_name),
-                    (
-                        starts.min(),
-                        starts.max(),
-                        durations.min(),
-                        durations.max(),
-                        durations.mean(),
-                        durations.std(ddof=0),
+                    tuple(
+                        value / 1000.0
+                        for value in (
+                            starts.min(),
+                            starts.max(),
+                            durations.min(),
+                            durations.max(),
+                            durations.mean(),
+                            durations.std(ddof=0),
+                        )
                     ),
                 )))
             rows.append(row)
