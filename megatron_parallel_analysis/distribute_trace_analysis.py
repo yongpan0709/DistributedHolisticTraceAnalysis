@@ -486,6 +486,142 @@ class DistributedMegatronTraceAnalysis:
         self.assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
         logger.info('Assigned tasks: %s', self.assigned_tasks)
 
+    def _ep_group_stats_events(self):
+        """Return the stable semantic event order used in EP group statistics rows."""
+        if self.pp_schedule == '1f1b':
+            return ('forward', 'backward')
+        if self.pp_schedule == '1f1b-interleaved':
+            return tuple(
+                f'{direction}_vpp{vpp_id}'
+                for direction in ('forward', 'backward')
+                for vpp_id in range(self.vpp_size)
+            )
+        raise ValueError(
+            f"EP group statistics are not supported for schedule "
+            f"{self.pp_schedule!r}"
+        )
+
+    @staticmethod
+    def _timeline_stat_columns(event_name):
+        return (
+            f'{event_name}_start_min_us',
+            f'{event_name}_start_max_us',
+            f'{event_name}_duration_min_us',
+            f'{event_name}_duration_max_us',
+            f'{event_name}_duration_mean_us',
+            f'{event_name}_duration_std_us',
+        )
+
+    def _write_ep_group_stats_csv(self, descriptor, timelines_by_rank):
+        """Write cross-rank GPU timing statistics for each micro-batch.
+
+        Each row represents one micro-batch.  Every event is aggregated over
+        all ranks in the EP descriptor.  The timeline extractors define the
+        positional event order: forward/backward for 1F1B, and all forward
+        VPP stages followed by all backward VPP stages for interleaved 1F1B.
+        """
+        event_names = self._ep_group_stats_events()
+        expected_interval_count = len(event_names)
+        expected_ranks = tuple(descriptor['ranks'])
+        ep_group_id = descriptor['ep_group_id']
+        if set(timelines_by_rank) != set(expected_ranks):
+            raise ValueError(
+                f'EP group {ep_group_id} rank mismatch: expected '
+                f'{expected_ranks}, got {tuple(timelines_by_rank)}'
+            )
+
+        expected_micro_batches = set(range(self.micro_bs))
+        validated_intervals = {}
+        for rank in expected_ranks:
+            timeline = timelines_by_rank[rank]
+            if set(timeline) != expected_micro_batches:
+                raise ValueError(
+                    f'EP group {ep_group_id} rank {rank} has invalid micro-batches: '
+                    f'{sorted(timeline)}'
+                )
+            for micro_batch_id in range(self.micro_bs):
+                intervals = timeline[micro_batch_id]
+                if len(intervals) != expected_interval_count:
+                    raise ValueError(
+                        f'EP group {ep_group_id} rank {rank}, micro-batch '
+                        f'{micro_batch_id} has {len(intervals)} intervals; expected '
+                        f'{expected_interval_count}'
+                    )
+                validated = []
+                for event_name, interval in zip(event_names, intervals):
+                    if len(interval) != 2:
+                        raise ValueError(
+                            f'EP group {ep_group_id} rank {rank}, micro-batch '
+                            f'{micro_batch_id}, event {event_name} has invalid '
+                            f'interval {interval!r}'
+                        )
+                    try:
+                        start = float(interval[0])
+                        duration = float(interval[1])
+                    except (TypeError, ValueError, OverflowError) as error:
+                        raise ValueError(
+                            f'EP group {ep_group_id} rank {rank}, micro-batch '
+                            f'{micro_batch_id}, event {event_name} has non-numeric '
+                            f'interval {interval!r}'
+                        ) from error
+                    if (
+                        not math.isfinite(start)
+                        or not math.isfinite(duration)
+                        or start <= 0
+                        or duration < 0
+                    ):
+                        raise ValueError(
+                            f'EP group {ep_group_id} rank {rank}, micro-batch '
+                            f'{micro_batch_id}, event {event_name} has invalid '
+                            f'start/duration ({start}, {duration})'
+                        )
+                    validated.append((start, duration))
+                validated_intervals[(rank, micro_batch_id)] = validated
+
+        columns = ['micro_batch_id'] + [
+            column
+            for event_name in event_names
+            for column in self._timeline_stat_columns(event_name)
+        ]
+        rows = []
+        for micro_batch_id in range(self.micro_bs):
+            row = {'micro_batch_id': micro_batch_id}
+            for event_index, event_name in enumerate(event_names):
+                starts = np.asarray(
+                    [
+                        validated_intervals[(rank, micro_batch_id)][event_index][0]
+                        for rank in expected_ranks
+                    ],
+                    dtype=float,
+                )
+                durations = np.asarray(
+                    [
+                        validated_intervals[(rank, micro_batch_id)][event_index][1]
+                        for rank in expected_ranks
+                    ],
+                    dtype=float,
+                )
+                row.update(dict(zip(
+                    self._timeline_stat_columns(event_name),
+                    (
+                        starts.min(),
+                        starts.max(),
+                        durations.min(),
+                        durations.max(),
+                        durations.mean(),
+                        durations.std(ddof=0),
+                    ),
+                )))
+            rows.append(row)
+
+        output_path = os.path.join(
+            self.ep_group_stats_dir,
+            f"ep_group_{ep_group_id}-pp_stage_{descriptor['pp_stage_id']}.csv",
+        )
+        pd.DataFrame(rows, columns=columns).to_csv(
+            output_path, index=False, float_format='%.3f'
+        )
+
     def _write_ep_trace(self, descriptor, traces_by_rank, pipeline_trace):
         expected_ranks = tuple(descriptor['ranks'])
         if set(traces_by_rank) != set(expected_ranks):
@@ -525,7 +661,7 @@ class DistributedMegatronTraceAnalysis:
                 for rank in descriptor['ranks']
             }
             self._write_ep_trace(descriptor, group_traces, pipeline_trace)
-            # self._write_ep_group_stats_csv(descriptor, group_timelines)
+            self._write_ep_group_stats_csv(descriptor, group_timelines)
 
     def _validate_pp_group_id_range(self, pp_group_id_range):
         if pp_group_id_range is None:
