@@ -395,10 +395,10 @@ class DistributedMegatronTraceAnalysis:
         
         # Create pipeline trace object
         pipeline_trace = self._create_pipeline_trace(trace_dir)
-        # pipeline_trace.configure_parse_cache(
-        #     cache_dir=self.parse_cache_dir,
-        #     rebuild=self.rebuild_parse_cache,
-        # )
+        pipeline_trace.configure_parse_cache(
+            cache_dir=self.parse_cache_dir,
+            rebuild=self.rebuild_parse_cache,
+        )
 
         # Parse traces per PP group
         logger.info('Construct CallGraph for traces')
@@ -486,6 +486,47 @@ class DistributedMegatronTraceAnalysis:
         self.assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
         logger.info('Assigned tasks: %s', self.assigned_tasks)
 
+    def _write_ep_trace(self, descriptor, traces_by_rank, pipeline_trace):
+        expected_ranks = tuple(descriptor['ranks'])
+        if set(traces_by_rank) != set(expected_ranks):
+            raise ValueError(
+                f"EP group {descriptor['ep_group_id']} trace rank mismatch: expected "
+                f'{expected_ranks}, got {tuple(traces_by_rank)}'
+            )
+        output_path = os.path.join(
+            self.ep_trace_dir,
+            f"ep_group_{descriptor['ep_group_id']}-pp_stage_"
+            f"{descriptor['pp_stage_id']}-trace.json",
+        )
+        pipeline_trace.save_traces_with_p2p_comm(
+            output_path,
+            traces={rank: traces_by_rank[rank] for rank in expected_ranks},
+        )
+
+    def _process_ep_bundle(self, bundle):
+        selected_source_ids = set(bundle['source_pp_group_ids'])
+        timelines_by_rank = {}
+        traces_by_rank = {}
+        pipeline_trace = None
+        for pp_group_id in sorted(selected_source_ids):
+            folder = self.all_pp_group_sub_dirs[pp_group_id]
+            pipeline_trace = self.process_single_pp_group(pp_group_id, folder)
+            for rank in self.all_pipeline_parallel_group_ranks[pp_group_id]:
+                timelines_by_rank[rank] = pipeline_trace.extract_rank_gpu_timeline(rank)
+                traces_by_rank[rank] = pipeline_trace.traces_comm_only[rank]
+
+        for descriptor in bundle['ep_groups']:
+            group_timelines = {
+                rank: timelines_by_rank[rank]
+                for rank in descriptor['ranks']
+            }
+            group_traces = {
+                rank: traces_by_rank[rank]
+                for rank in descriptor['ranks']
+            }
+            self._write_ep_trace(descriptor, group_traces, pipeline_trace)
+            # self._write_ep_group_stats_csv(descriptor, group_timelines)
+
     def _validate_pp_group_id_range(self, pp_group_id_range):
         if pp_group_id_range is None:
             return set(range(len(self.all_pipeline_parallel_group_ranks)))
@@ -518,14 +559,19 @@ class DistributedMegatronTraceAnalysis:
                 selected_pp_group_ids,
                 selected_bundles,
             )
-            # for bundle in self.assigned_tasks:
-            #     self._process_ep_bundle(bundle)
+            for bundle in self.assigned_tasks:
+                self._process_ep_bundle(bundle)
         else:
             self._assign_tasks_for_selection(selected_pp_group_ids)
             for pp_group_id, folder in self.assigned_tasks:
                 logger.debug(f'Processing pp group {pp_group_id}')
                 result = self.process_single_pp_group(pp_group_id, folder)
                 self.analysis_list.append(result)
+
+        # Note: Uncomment the following lines to enable full distributed analysis
+        # self.gather_infos_from_all_ranks()
+        # self.analyze_anomalies()
+        # self.post_process()
 
     def gather_infos_from_all_ranks(self):
         """Gather analysis results from all ranks to root process."""
