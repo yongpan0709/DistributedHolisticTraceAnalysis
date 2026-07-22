@@ -104,8 +104,6 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             return pool.starmap(parallel_callgraph_create, tasks)
 
     def _load_cached_rank(self, rank_id: int, trace_file: str):
-        if not self.parse_cache_enabled or self.parse_cache_dir is None:
-            return None
         metadata = build_rank_parse_cache_metadata(
             rank_id, trace_file, self.bwd_annotation_str
         )
@@ -119,8 +117,6 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         trace_file: str,
         full_df: pd.DataFrame,
     ) -> None:
-        if not self.parse_cache_enabled or self.parse_cache_dir is None:
-            return
         metadata = build_rank_parse_cache_metadata(
             rank_id, trace_file, self.bwd_annotation_str
         )
