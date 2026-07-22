@@ -395,10 +395,6 @@ class DistributedMegatronTraceAnalysis:
         
         # Create pipeline trace object
         pipeline_trace = self._create_pipeline_trace(trace_dir)
-        pipeline_trace.configure_parse_cache(
-            cache_dir=self.parse_cache_dir,
-            rebuild=self.rebuild_parse_cache,
-        )
 
         # Parse traces per PP group
         logger.info('Construct CallGraph for traces')
