@@ -1,10 +1,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, Optional
+import json
+import math
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
-import json
 from hta.common.trace_filter import NameFilter
 from hta.configs.config import logger
 from hta.configs.default_values import DEFAULT_TRACE_DIR
@@ -49,7 +50,12 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         return sorted_trace_df
 
 
-    def set_vpp_stage_id(self, trace_df: pd.DataFrame, stage_id: int) -> None:
+    def set_vpp_stage_id(
+        self,
+        trace_df: pd.DataFrame,
+        stage_id: int,
+        rank: Optional[int] = None,
+    ) -> None:
         trace_df.sort_values(by=['ts', 'dur'], ascending=[True, False], inplace=True)
         trace_df['vpp_stage_id'] = 0
         trace_df['micro_batch_id'] = -1
@@ -58,17 +64,123 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         schedule_table = get_schedule_table(num_microbatches, self.vpp_size, self.pipeline_parallel_size)
         micro_batch_order, _ = zip(*schedule_table)
         fwd_order, bwd_order, _ = convert_schedule_table_to_order(num_warmup_microbatches, self.vpp_size, schedule_table)
-        trace_df.loc[trace_df['s_name'].str.match(pat=r'^forward_step$'), 'micro_batch_id'] = micro_batch_order
-        trace_df.loc[trace_df['s_name'].str.match(pat=r'^backward_step$'), 'micro_batch_id'] = micro_batch_order
-        trace_df.loc[trace_df['s_name'].str.match(pat=r'^forward_step$'), 'vpp_stage_id'] = fwd_order
-        trace_df.loc[trace_df['s_name'].str.match(pat=r'^backward_step$'), 'vpp_stage_id'] = bwd_order
+        forward_mask = trace_df['s_name'].eq('forward_step')
+        backward_mask = trace_df['s_name'].eq('backward_step')
+        expected_count = len(micro_batch_order)
+        forward_count = int(forward_mask.sum())
+        backward_count = int(backward_mask.sum())
+        if forward_count != expected_count or backward_count != expected_count:
+            raise ValueError(
+                'Unexpected interleaved step count for '
+                f'rank {rank}, PP stage {stage_id}: expected {expected_count} per '
+                f'direction, got forward={forward_count}, backward={backward_count}'
+            )
+        trace_df.loc[forward_mask, 'micro_batch_id'] = micro_batch_order
+        trace_df.loc[backward_mask, 'micro_batch_id'] = micro_batch_order
+        trace_df.loc[forward_mask, 'vpp_stage_id'] = fwd_order
+        trace_df.loc[backward_mask, 'vpp_stage_id'] = bwd_order
 
     def set_micro_batch_id(self, pp_group_id: int = 0) -> None:
         """为指定 PP 组内各 rank 的 trace 设置 micro-batch id，由子类的 set_self_microbatch_id/set_recv_send_microbatch_id 实现具体算法。"""
         ranks = self.all_pipeline_parallel_group_ranks[pp_group_id]
         logger.info(f'[1F1B interleaved] In set micro batch id: ranks: {ranks}')
         for stage_id, rank in enumerate(ranks):
-            self.set_vpp_stage_id(self.traces_comm_only[rank], stage_id)
+            self.set_vpp_stage_id(self.traces_comm_only[rank], stage_id, rank)
+
+    @staticmethod
+    def _python_number(value):
+        return value.item() if hasattr(value, 'item') else value
+
+    def extract_rank_gpu_timeline(
+        self,
+        rank: int,
+    ) -> Dict[int, Tuple[Tuple[float, float], ...]]:
+        """Extract VPP GPU intervals per micro-batch.
+
+        The tuple order is forward VPP stages in ascending order, followed by
+        backward VPP stages in ascending order. Each interval is
+        ``(first_kernel_start, kernel_span)`` in original microsecond units.
+        """
+        trace_df = self.traces_comm_only[rank]
+        required_columns = {
+            's_name',
+            'micro_batch_id',
+            'vpp_stage_id',
+            'first_kernel_start',
+            'kernel_span',
+        }
+        missing_columns = required_columns.difference(trace_df.columns)
+        if missing_columns:
+            raise ValueError(
+                f'Cannot extract GPU timeline for rank {rank}; missing columns: '
+                f'{sorted(missing_columns)}'
+            )
+
+        step_df = trace_df[trace_df['s_name'].isin(('forward_step', 'backward_step'))]
+        intervals = {}
+        duplicate_keys = []
+        invalid_rows = []
+        for _, row in step_df.iterrows():
+            direction = 'forward' if row['s_name'] == 'forward_step' else 'backward'
+            try:
+                micro_batch_id = int(row['micro_batch_id'])
+                signed_vpp_id = int(row['vpp_stage_id'])
+                start = float(row['first_kernel_start'])
+                duration = float(row['kernel_span'])
+            except (TypeError, ValueError, OverflowError):
+                invalid_rows.append((direction, row.get('micro_batch_id'), row.get('vpp_stage_id')))
+                continue
+
+            valid_sign = signed_vpp_id > 0 if direction == 'forward' else signed_vpp_id < 0
+            logical_vpp_id = abs(signed_vpp_id) - 1
+            has_kernels = 'num_kernels' not in row.index or row['num_kernels'] > 0
+            if (
+                micro_batch_id < 0
+                or micro_batch_id >= self.micro_bs
+                or not valid_sign
+                or logical_vpp_id < 0
+                or logical_vpp_id >= self.vpp_size
+                or not math.isfinite(start)
+                or not math.isfinite(duration)
+                or start <= 0
+                or duration < 0
+                or not has_kernels
+            ):
+                invalid_rows.append((direction, micro_batch_id, signed_vpp_id))
+                continue
+
+            key = (direction, micro_batch_id, logical_vpp_id)
+            if key in intervals:
+                duplicate_keys.append(key)
+                continue
+            intervals[key] = (
+                self._python_number(row['first_kernel_start']),
+                self._python_number(row['kernel_span']),
+            )
+
+        expected_keys = {
+            (direction, micro_batch_id, vpp_id)
+            for direction in ('forward', 'backward')
+            for micro_batch_id in range(self.micro_bs)
+            for vpp_id in range(self.vpp_size)
+        }
+        missing_keys = sorted(expected_keys.difference(intervals))
+        extra_keys = sorted(set(intervals).difference(expected_keys))
+        if invalid_rows or duplicate_keys or missing_keys or extra_keys:
+            raise ValueError(
+                f'Invalid interleaved GPU timeline for rank {rank}: '
+                f'invalid={invalid_rows}, duplicates={sorted(set(duplicate_keys))}, '
+                f'missing={missing_keys}, extra={extra_keys}'
+            )
+
+        return {
+            micro_batch_id: tuple(
+                intervals[(direction, micro_batch_id, vpp_id)]
+                for direction in ('forward', 'backward')
+                for vpp_id in range(self.vpp_size)
+            )
+            for micro_batch_id in range(self.micro_bs)
+        }
 
     def get_p2p_ranks_pairs(self, ranks):
         if len(ranks) < 2: return []
