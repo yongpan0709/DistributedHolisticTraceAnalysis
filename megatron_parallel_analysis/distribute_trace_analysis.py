@@ -349,7 +349,9 @@ class DistributedMegatronTraceAnalysis:
                 ep=self.expert_model_parallel_size,
                 cp=self.context_parallel_size,
                 order=self.order,
-                micro_bs = self.micro_bs
+                micro_bs = self.micro_bs,
+                parse_cache_dir=self.parse_cache_dir,
+                rebuild_parse_cache=self.rebuild_parse_cache,
             )
         elif self.pp_schedule == '1f1b-interleaved':
             return MegatronPipelineParallel1F1BInterleavedGroupTrace(
@@ -362,7 +364,9 @@ class DistributedMegatronTraceAnalysis:
                 cp=self.context_parallel_size,
                 order=self.order,
                 vpp_size=self.vpp_size,
-                micro_bs = self.micro_bs
+                micro_bs = self.micro_bs,
+                parse_cache_dir=self.parse_cache_dir,
+                rebuild_parse_cache=self.rebuild_parse_cache,
             )
         elif self.pp_schedule == '1f1b-interleaved-epoverlap':
             return MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(
@@ -375,7 +379,9 @@ class DistributedMegatronTraceAnalysis:
                 cp=self.context_parallel_size,
                 order=self.order,
                 vpp_size=self.vpp_size,
-                micro_bs = self.micro_bs
+                micro_bs = self.micro_bs,
+                parse_cache_dir=self.parse_cache_dir,
+                rebuild_parse_cache=self.rebuild_parse_cache,
             )
 
     def analyze_pipeline_parallel_per_group(self, pp_group_id: int, trace_dir: str):

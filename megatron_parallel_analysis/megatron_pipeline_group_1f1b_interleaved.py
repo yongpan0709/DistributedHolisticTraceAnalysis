@@ -28,8 +28,10 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         #pp_schedule: str = "1f1b-interleaved",
         vpp_size = -1,
         micro_bs = 0,
+        parse_cache_dir: Optional[str] = None,
+        rebuild_parse_cache: bool = False,
         ) -> None:
-        super().__init__(trace_files, trace_dir, dp, tp, pp, ep, cp, order, micro_bs)
+        super().__init__(trace_files, trace_dir, dp, tp, pp, ep, cp, order, micro_bs, parse_cache_dir=parse_cache_dir, rebuild_parse_cache=rebuild_parse_cache)
         #self.pp_schedule = pp_schedule
         self.vpp_size = vpp_size
 

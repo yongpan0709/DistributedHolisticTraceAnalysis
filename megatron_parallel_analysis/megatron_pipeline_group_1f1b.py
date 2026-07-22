@@ -25,8 +25,10 @@ class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceB
         cp: int =1, 
         order: str ="tp-cp-ep-dp-pp",
         micro_bs: int =0,
+        parse_cache_dir: Optional[str] = None,
+        rebuild_parse_cache: bool = False,
         ) -> None:
-        super().__init__(trace_files, trace_dir, dp, tp, pp, ep, cp, order, micro_bs)
+        super().__init__(trace_files, trace_dir, dp, tp, pp, ep, cp, order, micro_bs, parse_cache_dir=parse_cache_dir, rebuild_parse_cache=rebuild_parse_cache)
 
     # Todo: func list
     @staticmethod
