@@ -20,6 +20,12 @@ from hta.common.trace_call_graph import CallGraph
 from hta.common.trace_file import get_trace_files
 from megatron_parallel_analysis.utils.parallel_state import RankGenerator
 from megatron_parallel_analysis.utils.call_graph_utils import get_main_stack_on_rank
+from megatron_parallel_analysis.utils.trace_parse_cache import (
+    build_rank_parse_cache_metadata,
+    get_rank_parse_cache_path,
+    load_rank_parse_cache,
+    write_rank_parse_cache,
+)
 
 
 def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_step'):
@@ -53,6 +59,8 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         cp: int =1, order: str ="tp-cp-ep-dp-pp",
         micro_bs: int=0,
         bwd_annotation_str: str = 'backward_step',
+        parse_cache_dir: Optional[str] = None,
+        rebuild_parse_cache: bool = False,
         # pp_schedule: str = "1f1b",
         # vpp_size = -1,
     ) -> None:
@@ -87,28 +95,76 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         #self.pp_group_trace: Dict[int, Trace] = {}
         self.full_dfs: Dict[int, pd.DataFrame] = {}
         self.is_parsed_per_pp_group: Dict[int, bool] = {}
+        self.parse_cache_dir = parse_cache_dir
+        self.rebuild_parse_cache = rebuild_parse_cache
+
+    def _parse_rank_tasks(self, tasks):
+        num_procs = min(mp.cpu_count(), len(tasks))
+        with mp.get_context("fork").Pool(num_procs) as pool:
+            return pool.starmap(parallel_callgraph_create, tasks)
+
+    def _load_cached_rank(self, rank_id: int, trace_file: str):
+        if not self.parse_cache_enabled or self.parse_cache_dir is None:
+            return None
+        metadata = build_rank_parse_cache_metadata(
+            rank_id, trace_file, self.bwd_annotation_str
+        )
+        cache_path = get_rank_parse_cache_path(self.parse_cache_dir, rank_id)
+        full_df = load_rank_parse_cache(cache_path, metadata)
+        return None if full_df is None else full_df.copy(deep=True)
+
+    def _write_cached_rank(
+        self,
+        rank_id: int,
+        trace_file: str,
+        full_df: pd.DataFrame,
+    ) -> None:
+        if not self.parse_cache_enabled or self.parse_cache_dir is None:
+            return
+        metadata = build_rank_parse_cache_metadata(
+            rank_id, trace_file, self.bwd_annotation_str
+        )
+        cache_path = get_rank_parse_cache_path(self.parse_cache_dir, rank_id)
+        write_rank_parse_cache(cache_path, metadata, full_df)
 
     # def get_ranks(self, pp_group_id: int = 0) -> List[int]:
-    #     """返回指定 PP 组内的 rank 列表。"""
+    #     """返回指定 PP Group内的 rank 列表。"""
     #     return self.all_pipeline_parallel_group_ranks[pp_group_id]
 
     def parse_traces_per_pp_group(self, pp_group_id=0) -> None:
         if self.is_parsed_per_pp_group.get(pp_group_id, False):
             logger.warning("Traces are already parsed and loaded!")
             return
-        num_procs = min(mp.cpu_count(), len(self.all_pipeline_parallel_group_ranks[pp_group_id]))
-        with mp.get_context("fork").Pool(num_procs) as pool:
-            tasks = [
-                (rank_i, self.trace_files[rank_i], self.bwd_annotation_str)
-                for rank_i in self.all_pipeline_parallel_group_ranks[pp_group_id]
-            ]
-            results = pool.starmap(parallel_callgraph_create, tasks)
-            pool.close()
-            pool.join()
-        for rank_id, main_stack_df in results:
-            logger.debug(f"rank id: {rank_id}")
-            self.full_dfs[rank_id] = main_stack_df
+
+        ranks = self.all_pipeline_parallel_group_ranks[pp_group_id]
+        cache_hits = []
+        tasks = []
+        for rank_id in ranks:
+            trace_file = self.trace_files[rank_id]
+            full_df = None
+            if not self.rebuild_parse_cache:
+                full_df = self._load_cached_rank(rank_id, trace_file)
+            if full_df is None:
+                tasks.append((rank_id, trace_file, self.bwd_annotation_str))
+            else:
+                self.full_dfs[rank_id] = full_df
+                cache_hits.append(rank_id)
+
+        rebuilt_ranks = []
+        if tasks:
+            results = self._parse_rank_tasks(tasks)
+            for rank_id, main_stack_df in results:
+                logger.debug(f"rank id: {rank_id}")
+                trace_file = self.trace_files[rank_id]
+                self._write_cached_rank(rank_id, trace_file, main_stack_df)
+                self.full_dfs[rank_id] = main_stack_df
+                rebuilt_ranks.append(rank_id)
+
         self.is_parsed_per_pp_group[pp_group_id] = True
+        logger.info(
+            f'PP group {pp_group_id} trace parse cache: '
+            f'hits={cache_hits}, rebuilt={rebuilt_ranks}'
+        )
 
     def etl_traces_per_pp_group(self, redirect_trace_dir, filter_out_funcs, pp_group_id=0) -> None:
         if self.is_parsed_per_pp_group.get(pp_group_id, False):
