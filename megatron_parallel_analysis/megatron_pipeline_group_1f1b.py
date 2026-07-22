@@ -1,7 +1,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, Optional
+import math
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -98,6 +99,93 @@ class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceB
             self.set_recv_send_microbatch_id(self.full_dfs[rank])
         self.process_pipeline_start(self.full_dfs[ranks[0]])
         self.process_pipeline_end(self.full_dfs[ranks[-1]])
+
+    @staticmethod
+    def _python_number(value):
+        return value.item() if hasattr(value, 'item') else value
+
+    def extract_rank_gpu_timeline(
+        self,
+        rank: int,
+    ) -> Dict[int, Tuple[Tuple[float, float], ...]]:
+        """Extract ``(forward, backward)`` GPU intervals per micro-batch.
+
+        Each interval is ``(first_kernel_start, kernel_span)`` in the trace's
+        original microsecond units.
+        """
+        trace_df = self.full_dfs[rank]
+        required_columns = {
+            's_name',
+            'micro_batch_id_forward',
+            'micro_batch_id_backward',
+            'first_kernel_start',
+            'kernel_span',
+        }
+        missing_columns = required_columns.difference(trace_df.columns)
+        if missing_columns:
+            raise ValueError(
+                f'Cannot extract GPU timeline for rank {rank}; missing columns: '
+                f'{sorted(missing_columns)}'
+            )
+
+        step_df = trace_df[trace_df['s_name'].isin(('forward_step', 'backward_step'))]
+        intervals = {}
+        duplicate_keys = []
+        invalid_rows = []
+        for _, row in step_df.iterrows():
+            direction = 'forward' if row['s_name'] == 'forward_step' else 'backward'
+            micro_batch_column = f'micro_batch_id_{direction}'
+            try:
+                micro_batch_id = int(row[micro_batch_column])
+                start = float(row['first_kernel_start'])
+                duration = float(row['kernel_span'])
+            except (TypeError, ValueError, OverflowError):
+                invalid_rows.append((direction, row.get(micro_batch_column)))
+                continue
+
+            has_kernels = 'num_kernels' not in row.index or row['num_kernels'] > 0
+            if (
+                micro_batch_id < 0
+                or micro_batch_id >= self.micro_bs
+                or not math.isfinite(start)
+                or not math.isfinite(duration)
+                or start <= 0
+                or duration < 0
+                or not has_kernels
+            ):
+                invalid_rows.append((direction, micro_batch_id))
+                continue
+
+            key = (direction, micro_batch_id)
+            if key in intervals:
+                duplicate_keys.append(key)
+                continue
+            intervals[key] = (
+                self._python_number(row['first_kernel_start']),
+                self._python_number(row['kernel_span']),
+            )
+
+        expected_keys = {
+            (direction, micro_batch_id)
+            for direction in ('forward', 'backward')
+            for micro_batch_id in range(self.micro_bs)
+        }
+        missing_keys = sorted(expected_keys.difference(intervals))
+        extra_keys = sorted(set(intervals).difference(expected_keys))
+        if invalid_rows or duplicate_keys or missing_keys or extra_keys:
+            raise ValueError(
+                f'Invalid 1F1B GPU timeline for rank {rank}: '
+                f'invalid={invalid_rows}, duplicates={sorted(set(duplicate_keys))}, '
+                f'missing={missing_keys}, extra={extra_keys}'
+            )
+
+        return {
+            micro_batch_id: tuple(
+                intervals[(direction, micro_batch_id)]
+                for direction in ('forward', 'backward')
+            )
+            for micro_batch_id in range(self.micro_bs)
+        }
 
     def get_p2p_ranks_pairs(self, ranks):
         if len(ranks) < 2: return []
