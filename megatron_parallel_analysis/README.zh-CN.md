@@ -10,18 +10,24 @@
 - **按 PP group 分发分析任务**：根据 TP / CP / EP / DP / PP 配置生成并行组。
 - **MPI 多进程并行处理**：每个 MPI 进程负责一段 PP group，降低单进程加载和解析大规模 trace 的压力。
 - **Pipeline 调度专项分析**：支持 `1f1b`、`1f1b-interleaved`、`1f1b-interleaved-epoverlap` 三类调度。
-- **PP group 分析**：为每个 PP group 构建 HTA `Trace` / `CallGraph`，提取通信相关函数，关联相邻 stage 的 P2P send / recv，计算实际的通信耗时和等待耗时 wait time。
-- **报告与 trace 导出**：为每个 PP group 输出 `report-pp<id>.csv` 和 `pp<id>-trace.json`，用于观察 stage 等待、bubble、通信和负载差异。
+- **PP/EP group 分析**：为每个 PP/EP group 构建 HTA `Trace` / `CallGraph`，提取通信相关函数，关联相邻 stage 的 P2P send / recv，计算实际的通信耗时和等待耗时 wait time、fwd/bwd的 start ts 和 duration。
+- **PP group 的报告分析与 trace 导出**：为每个 PP group 输出 `report-pp<id>.csv`、`report-pp<id>-detail.csv` 和 `pp<id>-trace.json`，用于分析 stage 等待、pipeline bubble、P2P 通信和负载差异。
+- **EP group 的报告分析与 trace 导出**：启用 EP 分析后，为同一 PP stage 上的每个 EP group 输出 `ep_group_<ep-id>-pp_stage_<stage-id>.csv` GPU 时间统计报告，以及 `ep_group_<ep-id>-pp_stage_<stage-id>-trace.json` 合并 trace，能够基于 perfetto 可视化的直观比较各 EP rank 在每个 micro-batch 中的 GPU 起始时间和持续时间。
 - **集群级聚合能力**：保留跨 MPI rank 聚合与异常检测逻辑，可进一步启用 PP group 间、layer 间的 straggler 分析。
 
 - **异常节点/GPU/算子检测**
    - 比较同一 rank 上不同 layer 之间的耗时差异，定位时间不稳定的算子。
    - 比较同一时间不同 rank 之间的耗时差异，定位跨机器或跨卡的空间不稳定性。
+   - 对比同一 EP group、同一 PP stage 和同一 micro-batch 下各 EP rank 的 GPU duration min/max/mean/std，识别 Expert 计算负载不均衡、慢卡或异常算子导致的 EP straggler。
+   - 对比各 EP rank 的 GPU start ts min/max，识别执行起点偏移以及可能由同步、调度或通信等待引起的异常；再结合 EP group 合并 trace 定位具体 rank、micro-batch 和 forward/backward（或 VPP）阶段。
 
 ## 目录结构
 
 ```text
 megatron_parallel_analysis/
+├── README.md
+├── README.zh-CN.md
+├── install_hta.sh
 ├── distribute_trace_analysis.py
 ├── run_distributed_megatron_trace_analysis.py
 ├── trace_etl.py
@@ -30,12 +36,27 @@ megatron_parallel_analysis/
 ├── megatron_pipeline_group_1f1b_interleaved.py
 ├── megatron_pipeline_group_1f1b_interleaved_epoverlap.py
 └── utils/
+    ├── __init__.py
     ├── call_graph_utils.py
     ├── parallel_state.py
     ├── pipeline_parallel_utils.py
     ├── trace_filter_utils.py
+    ├── trace_parse_cache.py
     └── utils.py
 ```
+
+其中：
+
+- `distribute_trace_analysis.py`：编排 PP group 和完整 EP group 的 MPI 分布式分析任务，并生成 PP/EP 分析结果。
+- `run_distributed_megatron_trace_analysis.py`：PP/EP trace 分析的命令行入口。
+- `trace_etl.py`：原始 trace 的并行清洗入口。
+- `megatron_pipeline_group_base.py`：pipeline group 分析基类，提供 trace 解析、通信过滤、P2P 关联和报告生成等通用能力。
+- `megatron_pipeline_group_1f1b.py`：普通 1F1B 调度分析及 rank 级 forward/backward GPU timeline 提取。
+- `megatron_pipeline_group_1f1b_interleaved.py`：interleaved 1F1B 调度分析及 VPP GPU timeline 提取。
+- `megatron_pipeline_group_1f1b_interleaved_epoverlap.py`：interleaved + EP overlap 调度的 PP 分析实现。
+- `utils/trace_parse_cache.py`：rank 级 trace 解析缓存的读取、校验和写入。
+- `install_hta.sh`：多机环境下的 HTA 安装辅助脚本。
+
 
 ## 典型工作流
 
@@ -68,14 +89,20 @@ bash install_hta.sh <HolisticTraceAnalysis_Path>  # 需要hostfile
 | `--trace-dir` | 是 | 无 | 原始 trace 目录。 |
 | `--tp` | 否 | `1` | Tensor Parallel size。 |
 | `--pp` | 否 | `2` | Pipeline Parallel size。 |
-| `--dp` | 否 | `1` | Data Parallel size。 |
+| `--dp` | 否 | `8` | 总 Data Parallel size；必须能被 `--ep` 整除。 |
 | `--ep` | 否 | `8` | Expert Parallel size。 |
 | `--pp-schedule` | 否 | `1f1b` | Pipeline 调度方式，可选：`1f1b`、`1f1b-interleaved`、`1f1b-interleaved-epoverlap`。 |
 | `--num-bs` | 否 | `16` | Micro batch 数量，传给分析器的 `micro_bs`。 |
 | `--vpp` | 否 | `2` | Virtual Pipeline Parallel size，仅 interleaved 类调度使用。 |
 | `--pp-group-id-range` | 否 | `None` | 仅分析指定 PP group 闭区间，格式为 `START END`。 |
+| `--enable_ep_analysis` | 否 | 关闭 | 显式启用 MoE 模型的 EP 分析；默认只分析 PP group。`ep=1` 时按 dense 模型处理，不生成 EP 结果。 |
+| `--rebuild-parse-cache` | 否 | 关闭 | 忽略并刷新本次分析涉及 ranks 的缓存。 |
 
+`--enable_ep_analysis` 在 `ep>1` 时为 `1f1b` 和 `1f1b-interleaved` 调度启用 MoE EP 分析；`1f1b-interleaved-epoverlap` 当前即使指定该参数也仍只执行 PP 分析。未指定 `--pp-group-id-range` 时，会分析全部 PP groups 和全部完整 EP groups；指定范围时，范围必须完整覆盖一个 EP group 依赖的全部 PP groups。只与某个 group 部分相交时，程序会在处理 trace 前报错退出，不会使用不完整的 rank 集合计算 EP 统计；完整覆盖一个或多个 groups 时，会输出对应的 PP 和 EP 结果。
 
+其中 `--dp` 表示总 Data Parallel size，`--ep` 表示 Expert Parallel size。EP 分析要求两者均为正数且满足 `dp % ep == 0`，内部 Expert Data Parallel size 按 `dp / ep` 计算。EP groups 及其 PP groups 均由 Megatron rank groups 映射得到，不依赖 rank 算术推断。
+
+解析缓存默认启用。每个 rank 的缓存保存原始 trace 解析、符号解码和 CallGraph 构建后得到的 pristine main-stack DataFrame。重复运行（包括再次选择相同的 `--pp-group-id-range`）会加载有效的 rank 缓存，仅构建缺失或失效的 ranks。源 trace 的真实路径或文件元数据发生变化、backward annotation 变化，或 cache/parser schema 更新时，对应缓存会自动失效。通信事件过滤、micro-batch 标注、P2P 关联和报告生成仍会在每次运行中执行。如果修改了当前 parser version 尚未覆盖的解析或 CallGraph 行为，请使用 `--rebuild-parse-cache`。
 
 ## MPI 多进程运行示例：
 大规模 trace 建议用 MPI 启动，让多个进程并行处理不同 PP group。
@@ -166,7 +193,11 @@ workspace/
         ├── pp0-trace.json
         ├── pp1-trace.json
         ├── report-pp0.csv
-        └── report-pp1.csv
+        ├── report-pp1.csv
+        ├── ep_group_stats/
+        │   └── ep_group_<ep-id>-pp_stage_<stage-id>.csv
+        └── ep_trace/
+            └── ep_group_<ep-id>-pp_stage_<stage-id>-trace.json
 ```
 
 主要输出：
@@ -176,7 +207,34 @@ workspace/
 3. `trace/pp<id>-trace.json`：保留 P2P 通信信息后的 PP group trace。
 4. `trace/report-pp<id>.csv`：当前 PP group 的摘要版 pipeline 分析报告。
 5. `trace/report-pp<id>-detail.csv`：同一个 PP group 的 bubble 明细拆分报告。
-6. `output/stragglers/`：启用聚合与异常分析后保存 straggler 图表和结果。
+6. `trace/ep_group_stats/ep_group_<ep-id>-pp_stage_<stage-id>.csv`：仅当 `--enable_ep_analysis` 对 `1f1b` 或 `1f1b-interleaved` 调度生效时，生成每个 EP group 聚合后的 GPU 时间统计数据。
+7. `trace/ep_trace/ep_group_<ep-id>-pp_stage_<stage-id>-trace.json`：在相同条件下生成同一个 EP group、同一个 PP stage 的合并 trace，恰好包含该 EP group 的 `ep_size` 个已处理 rank。
+8. `output/stragglers/`：启用聚合与异常分析后保存 straggler 图表和结果。
+9. EP group statistics 文件中的 `ep-id` 是 `RankGenerator.get_ranks('ep')` 返回列表的索引，`stage-id` 是 rank 在其 PP group 中的位置。每一行表示一个按 `micro_batch_id` 排序的 micro-batch，并汇总该 EP group 中全部 rank 的数据。普通 `1f1b` 的事件为 `forward` 和 `backward`；`1f1b-interleaved` 的事件依次为 `forward_vpp0` 至 `forward_vpp<N-1>`，再到 `backward_vpp0` 至 `backward_vpp<N-1>`。每个事件包含 `<event>_start_min_ms`、`<event>_start_max_ms`、`<event>_duration_min_ms`、`<event>_duration_max_ms`、`<event>_duration_mean_ms` 和 `<event>_duration_std_ms` 六列。start 来自绝对 GPU 时间戳 `first_kernel_start`，duration 来自 `kernel_span`，二者都会从 trace 的微秒单位转换为毫秒。duration 标准差按 EP ranks 的总体标准差计算（`ddof=0`）。CSV 数值保留三位小数。若 rank、micro-batch 或时间区间缺失、重复、格式错误或无效，会校验失败且不生成残缺文件。
+10. 使用 `--pp-group-id-range` 时，只有所选范围包含某个 EP group 所需的全部 PP groups，才会生成对应的 EP group statistics CSV 和合并 EP group JSON。若范围与某个 group 相交但未覆盖其全部 PP groups，程序会在处理任何已选 trace 前校验失败。合并 JSON 中的 rank 由 descriptor 的 `ep_group_id` 和 `pp_stage_id` 确定，恰好包含 `ep_size` 个已处理 rank；interleaved trace 中保留 `forward_step_mb<mb>_vpp<vpp>` / `backward_step_mb<mb>_vpp<vpp>` 事件名。`1f1b` 和 `1f1b-interleaved` 均按完整 EP group 分配 MPI 任务，group 内仍逐个解析 PP trace，以控制内存峰值。
+
+### `ep_group_<ep-id>-pp_stage_<stage-id>.csv` EP 聚合统计列说明
+
+[`distribute_trace_analysis.py:491-628`](distribute_trace_analysis.py#L491-L628) 生成的 EP 聚合统计报告以每个 micro-batch 一行的形式，汇总同一个 EP group 中全部 rank 的 GPU 时间数据。文件名中的 `ep-id` 是 `RankGenerator.get_ranks('ep')` 返回列表的索引，`stage-id` 是这些 rank 在各自 PP group 中的 pipeline stage 位置。
+
+| 标识 | CSV 列名 | 含义 |
+| --- | --- | --- |
+| A | `micro_batch_id` | 当前行对应的 micro-batch 编号，从 `0` 开始。 |
+| B | `<event>_start_min_ms` | 当前事件在 EP group 全部 rank 中最早的 GPU 开始时间，即 `first_kernel_start` 的最小值，单位为毫秒。 |
+| C | `<event>_start_max_ms` | 当前事件在 EP group 全部 rank 中最晚的 GPU 开始时间，即 `first_kernel_start` 的最大值，单位为毫秒。`C - B` 可用于衡量各 rank 进入该事件的时间偏差。 |
+| D | `<event>_duration_min_ms` | 当前事件在 EP group 全部 rank 中最短的 GPU kernel span，单位为毫秒。 |
+| E | `<event>_duration_max_ms` | 当前事件在 EP group 全部 rank 中最长的 GPU kernel span，单位为毫秒。`E - D` 可用于衡量各 rank 的耗时极差。 |
+| F | `<event>_duration_mean_ms` | 当前事件在 EP group 全部 rank 中 GPU kernel span 的算术平均值，单位为毫秒。 |
+| G | `<event>_duration_std_ms` | 当前事件在 EP group 全部 rank 中 GPU kernel span 的总体标准差，使用 `ddof=0` 计算，单位为毫秒。该值越大，表示 rank 间耗时差异越明显。 |
+
+其中，`<event>` 会根据 pipeline 调度方式展开：
+
+| 调度方式 | `<event>` 取值及列顺序 |
+| --- | --- |
+| `1f1b` | `forward`、`backward` |
+| `1f1b-interleaved` | `forward_vpp0` 至 `forward_vpp<N-1>`，然后是 `backward_vpp0` 至 `backward_vpp<N-1>`；`N` 为 VPP size。 |
+
+因此，每个事件都会重复生成 B～G 六类统计列。`start` 是 trace 中的绝对 GPU 时间戳，可用于比较同一份 trace 内各 rank 的事件到达时间；`duration` 使用从首个 kernel 开始到最后一个 kernel 结束的 `kernel_span`，其中可能包含 kernel 之间的空闲或等待时间，并不等同于所有 kernel 执行时长之和。原始 trace 的微秒值在写入 CSV 时统一转换为毫秒，数值保留三位小数。
 
 ### `report-pp<id>.csv` 摘要列说明
 
@@ -278,9 +336,12 @@ workspace/
 - **MPI 运行失败**：检查 hostfile、工作目录、Python 环境、`mpi4py` 安装和节点间 SSH 配置。
 - **interleaved 结果异常**：确认 `--vpp` 与训练时 virtual pipeline parallel size 一致。
 
-### 基于Pipeline 分析生成的csv数据，问题分析prompt参考建议
+### 基于Pipeline Parallel Group 分析生成的csv数据，问题分析prompt参考建议
 
 workspace/*** 路径下面是大模型预训练过程中，某一次采集的profile traces，通过当前megatron_parallel_analysis路径下，dhta分析 Pipeline Parallel 的统计数据。每一个csv文件，包含的内容信息介绍可以参考 megatron_parallel_analysis/README.md 中，report-pp<id>-detail.csv bubble 明细列说明章节介绍了每个列的数据意义。对比分析一下现在路径下 workspace/*** 下面*个pp group的统计信息，是否存在什么异常点, 形成一个可量化的分析报告，并写入md文件。
+
+### 基于Expert Pipeline 分析生成的csv数据，问题分析prompt参考建议
+workspace/***/trace/ep_group_stats 路径下面是大模型预训练过程中，某一次采集的profile traces，通过当前megatron_parallel_analysis路径下，dhta分析 Pipeline+Expert Parallel 的统计数据。每一个csv文件，包含的内容信息介绍可以参考 megatron_parallel_analysis/README.zh-CN.md 中，ep_group_<ep-id>-pp_stage_<stage-id>.csv EP 聚合统计列说明章节介绍了每个列的数据意义。对比分析一下现在路径下 workspace/ 下面*个ep group的统计信息，是否存在什么异常点, 形成一个可量化的分析报告，并写入md文件。
 
 ## 核心模块
 

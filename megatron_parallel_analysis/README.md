@@ -11,18 +11,24 @@ This directory only contains Megatron distributed and pipeline-specific analysis
 - **Distribute analysis by PP group**: generate Megatron-style rank groups from TP / CP / EP / DP / PP settings and symlink or group rank traces under `workspace/<trace-name>/trace/pp_group_<id>/`.
 - **MPI multi-process execution**: each MPI process handles a subset of PP groups, reducing the memory and parsing pressure of very large traces.
 - **Pipeline schedule analysis**: supports `1f1b`, `1f1b-interleaved`, and `1f1b-interleaved-epoverlap`.
-- **Per-PP-group processing**: builds HTA `Trace` / `CallGraph` objects, extracts communication-related spans, assigns micro batch IDs, and links P2P send / recv events between adjacent stages.
-- **Report and trace export**: writes `report-pp<id>.csv` and `pp<id>-trace.json` for each PP group to inspect stage wait time, bubbles, communication, and workload imbalance.
+- **PP/EP group analysis**: builds HTA `Trace` / `CallGraph` objects for each PP/EP group, extracts communication-related spans, links P2P send / recv events between adjacent stages, and computes actual communication time, wait time, forward/backward start timestamps, and durations.
+- **PP group report analysis and trace export**: writes `report-pp<id>.csv`, `report-pp<id>-detail.csv`, and `pp<id>-trace.json` for each PP group to analyze stage wait time, pipeline bubbles, P2P communication, and workload imbalance.
+- **EP group report analysis and trace export**: when EP analysis is enabled, writes `ep_group_<ep-id>-pp_stage_<stage-id>.csv` GPU timing statistics reports and `ep_group_<ep-id>-pp_stage_<stage-id>-trace.json` merged traces for each EP group at the same PP stage, enabling direct Perfetto-based comparison of GPU start times and durations across EP ranks for every micro-batch.
 - **Cluster-level aggregation hooks**: keeps MPI gather and anomaly-detection logic that can be enabled for PP-group and layer-level straggler analysis.
 
 - **Abnormal node / GPU / operator detection**:
   - Compare latency differences across layers on the same rank to locate operators with unstable execution time.
   - Compare latency differences across ranks at the same time to locate spatial instability across machines or GPUs.
+  - Compare GPU duration min/max/mean/std across EP ranks for the same EP group, PP stage, and micro-batch to identify imbalanced Expert workload, slow GPUs, or EP stragglers caused by abnormal operators.
+  - Compare GPU start-timestamp min/max across EP ranks to identify execution-start offsets that may be caused by synchronization, scheduling, or communication waits; then use the merged EP trace to locate the affected rank, micro-batch, and forward/backward or VPP stage.
 
 ## Layout
 
 ```text
 megatron_parallel_analysis/
+├── README.md
+├── README.zh-CN.md
+├── install_hta.sh
 ├── distribute_trace_analysis.py
 ├── run_distributed_megatron_trace_analysis.py
 ├── trace_etl.py
@@ -31,12 +37,26 @@ megatron_parallel_analysis/
 ├── megatron_pipeline_group_1f1b_interleaved.py
 ├── megatron_pipeline_group_1f1b_interleaved_epoverlap.py
 └── utils/
+    ├── __init__.py
     ├── call_graph_utils.py
     ├── parallel_state.py
     ├── pipeline_parallel_utils.py
     ├── trace_filter_utils.py
+    ├── trace_parse_cache.py
     └── utils.py
 ```
+
+The main modules are:
+
+- `distribute_trace_analysis.py`: orchestrates MPI-distributed analysis tasks for PP groups and complete EP groups, and generates PP/EP analysis results.
+- `run_distributed_megatron_trace_analysis.py`: command-line entrypoint for PP/EP trace analysis.
+- `trace_etl.py`: parallel raw-trace cleaning entrypoint.
+- `megatron_pipeline_group_base.py`: pipeline-group analysis base class providing shared trace parsing, communication filtering, P2P linking, and report generation.
+- `megatron_pipeline_group_1f1b.py`: regular 1F1B analysis and rank-level forward/backward GPU timeline extraction.
+- `megatron_pipeline_group_1f1b_interleaved.py`: interleaved 1F1B analysis and VPP GPU timeline extraction.
+- `megatron_pipeline_group_1f1b_interleaved_epoverlap.py`: PP analysis for interleaved scheduling with EP overlap.
+- `utils/trace_parse_cache.py`: reads, validates, and writes rank-level trace parse caches.
+- `install_hta.sh`: HTA installation helper for multi-node environments.
 
 ## Typical workflow
 
@@ -69,12 +89,20 @@ bash install_hta.sh <HolisticTraceAnalysis_Path>  # requires hostfile
 | `--trace-dir` | Yes | None | Raw trace directory. |
 | `--tp` | No | `1` | Tensor Parallel size. |
 | `--pp` | No | `2` | Pipeline Parallel size. |
-| `--dp` | No | `1` | Data Parallel size. |
+| `--dp` | No | `8` | Total Data Parallel size; must be divisible by `--ep`. |
 | `--ep` | No | `8` | Expert Parallel size. |
 | `--pp-schedule` | No | `1f1b` | Pipeline schedule. Choices: `1f1b`, `1f1b-interleaved`, `1f1b-interleaved-epoverlap`. |
 | `--num-bs` | No | `16` | Number of micro batches, passed to the analyzer as `micro_bs`. |
 | `--vpp` | No | `2` | Virtual Pipeline Parallel size, used only by interleaved schedules. |
 | `--pp-group-id-range` | No | `None` | Inclusive PP group range to analyze, formatted as `START END`. |
+| `--enable_ep_analysis` | No | Disabled | Explicitly enable EP analysis for MoE models; PP-only analysis remains the default. With `ep=1`, the model is treated as dense and no EP output is generated. |
+| `--rebuild-parse-cache` | No | Disabled | Ignore and refresh caches for ranks analyzed in this run. |
+
+`--enable_ep_analysis` enables MoE EP analysis when `ep>1` for the `1f1b` and `1f1b-interleaved` schedules. The `1f1b-interleaved-epoverlap` schedule currently remains PP-only even when the flag is present. Without `--pp-group-id-range`, all PP groups and all complete EP bundles are analyzed. With a range, it must fully cover every source PP group required by an EP bundle. A range that partially overlaps a bundle fails before trace processing; incomplete rank subsets are never used for EP statistics. A range covering one or more complete bundles produces the corresponding PP and EP outputs.
+
+Here `--dp` is the total data-parallel size and `--ep` is the expert-parallel size. EP analysis requires positive values and `dp % ep == 0`; internally, Expert Data Parallel size is derived as `dp / ep`. EP groups and their source PP groups are generated from Megatron rank groups rather than inferred with rank arithmetic.
+
+Parse caching is enabled by default. Each rank cache stores the pristine main-stack DataFrame produced after raw trace parsing, symbol decoding, and CallGraph construction. Repeated runs, including runs selecting the same `--pp-group-id-range`, load valid rank entries and build only missing or invalid ranks. A cache entry is invalidated when its resolved source trace path or file metadata changes, when the backward annotation changes, or when the cache/parser schema changes. Filtering, micro-batch assignment, P2P linking, and report generation still run every time. Use `--rebuild-parse-cache` after changing parsing or CallGraph behavior that is not represented by the current parser version.
 
 ## MPI multi-process execution examples
 
@@ -164,7 +192,11 @@ workspace/
         ├── pp0-trace.json
         ├── pp1-trace.json
         ├── report-pp0.csv
-        └── report-pp1.csv
+        ├── report-pp1.csv
+        ├── ep_group_stats/
+        │   └── ep_group_<ep-id>-pp_stage_<stage-id>.csv
+        └── ep_trace/
+            └── ep_group_<ep-id>-pp_stage_<stage-id>-trace.json
 ```
 
 Main outputs:
@@ -174,7 +206,34 @@ Main outputs:
 3. `trace/pp<id>-trace.json`: PP group trace with P2P communication information preserved.
 4. `trace/report-pp<id>.csv`: summary pipeline analysis report for the PP group.
 5. `trace/report-pp<id>-detail.csv`: detailed bubble breakdown for the same PP group.
-6. `output/stragglers/`: straggler charts and result files when aggregation and anomaly analysis are enabled.
+6. `trace/ep_group_stats/ep_group_<ep-id>-pp_stage_<stage-id>.csv`: aggregated per-EP-group GPU timing statistics, generated only when `--enable_ep_analysis` is effective for `1f1b` or `1f1b-interleaved`.
+7. `trace/ep_trace/ep_group_<ep-id>-pp_stage_<stage-id>-trace.json`: merged trace containing exactly the processed `ep_size` ranks for one EP group and PP stage, generated under the same conditions.
+8. `output/stragglers/`: straggler charts and result files when aggregation and anomaly analysis are enabled.
+9. In an EP group statistics file, `ep-id` is the index returned by `RankGenerator.get_ranks('ep')`, and `stage-id` is the rank's position in its PP group. Each row represents one micro-batch ordered by `micro_batch_id` and aggregates all ranks in the EP group. For `1f1b`, events are `forward` and `backward`; for `1f1b-interleaved`, events run from `forward_vpp0` through `forward_vpp<N-1>`, followed by `backward_vpp0` through `backward_vpp<N-1>`. Each event contains `<event>_start_min_ms`, `<event>_start_max_ms`, `<event>_duration_min_ms`, `<event>_duration_max_ms`, `<event>_duration_mean_ms`, and `<event>_duration_std_ms`. Start values come from absolute GPU `first_kernel_start` timestamps and duration values from `kernel_span`; both are converted from microseconds to milliseconds. Duration standard deviation uses the population definition (`ddof=0`). Values are written with three decimal places. Missing, duplicate, malformed, or invalid rank, micro-batch, or interval data fails validation and does not produce a partial file.
+10. With `--pp-group-id-range`, EP statistics CSVs and merged EP JSON traces are generated only when the selected range contains every source PP group required by an EP group. If the range intersects an EP group without covering all of its source PP groups, validation fails before any selected trace is processed. The merged JSON contains the `ep_size` processed rank traces identified by `ep_group_id` and `pp_stage_id`; interleaved traces retain `forward_step_mb<mb>_vpp<vpp>` and `backward_step_mb<mb>_vpp<vpp>` event names. Both `1f1b` and `1f1b-interleaved` MPI work is assigned by complete EP group, while PP traces inside a group are parsed sequentially to bound peak memory.
+
+### `ep_group_<ep-id>-pp_stage_<stage-id>.csv` EP aggregate statistics columns
+
+The EP aggregate report generated by [`distribute_trace_analysis.py:491-628`](distribute_trace_analysis.py#L491-L628) contains one row per micro-batch and aggregates GPU timing data from all ranks in one EP group. In the filename, `ep-id` is the index returned by `RankGenerator.get_ranks('ep')`, and `stage-id` is the pipeline-stage position of these ranks in their respective PP groups.
+
+| Label | CSV column | Meaning |
+| --- | --- | --- |
+| A | `micro_batch_id` | Micro-batch number for the row, starting at `0`. |
+| B | `<event>_start_min_ms` | Earliest GPU start time across all EP-group ranks, i.e. the minimum `first_kernel_start`, in milliseconds. |
+| C | `<event>_start_max_ms` | Latest GPU start time across all EP-group ranks, i.e. the maximum `first_kernel_start`, in milliseconds. `C - B` measures the arrival-time skew across ranks. |
+| D | `<event>_duration_min_ms` | Shortest GPU kernel span across all EP-group ranks, in milliseconds. |
+| E | `<event>_duration_max_ms` | Longest GPU kernel span across all EP-group ranks, in milliseconds. `E - D` measures the duration range across ranks. |
+| F | `<event>_duration_mean_ms` | Arithmetic mean of the GPU kernel span across all EP-group ranks, in milliseconds. |
+| G | `<event>_duration_std_ms` | Population standard deviation of the GPU kernel span across all EP-group ranks, computed with `ddof=0`, in milliseconds. A larger value indicates greater duration imbalance across ranks. |
+
+The `<event>` names and order depend on the pipeline schedule:
+
+| Schedule | `<event>` values and order |
+| --- | --- |
+| `1f1b` | `forward`, `backward` |
+| `1f1b-interleaved` | `forward_vpp0` through `forward_vpp<N-1>`, followed by `backward_vpp0` through `backward_vpp<N-1>`; `N` is the VPP size. |
+
+Each event therefore has the six B–G statistic columns. `start` is the absolute GPU timestamp in the trace and can be used to compare event arrival times across ranks in the same trace. `duration` is the `kernel_span` from the first kernel start to the last kernel end; it may include idle or waiting time between kernels and is not the sum of all kernel execution durations. Original trace values in microseconds are converted to milliseconds when writing the CSV, with three decimal places.
 
 ### `report-pp<id>.csv` summary columns
 
@@ -275,9 +334,15 @@ A remaining gap in the current implementation is that communication inside `fina
 - **MPI launch failure**: check hostfile, working directory, Python environment, `mpi4py`, and SSH configuration.
 - **Unexpected interleaved results**: confirm `--vpp` matches the virtual pipeline parallel size used in training.
 
-## Prompt suggestion for CSV-based pipeline analysis
+## Prompt suggestions for CSV-based analysis
 
-The `workspace/***` path contains profile traces collected from one large-model pretraining run, together with DHTA pipeline-parallel statistics generated by `megatron_parallel_analysis`. The meaning of each CSV column can be found in the `report-pp<id>-detail.csv` bubble breakdown section of `megatron_parallel_analysis/README.md`. Compare the statistics of the PP groups under `workspace/***`, identify any abnormal patterns, produce a quantitative analysis report, and write the result into a Markdown file.
+### Pipeline Parallel Group analysis
+
+The `workspace/***` path contains profile traces collected from one large-model pretraining run, together with DHTA Pipeline Parallel statistics generated by `megatron_parallel_analysis`. The meaning of each CSV column can be found in the `report-pp<id>-detail.csv` bubble breakdown section of `megatron_parallel_analysis/README.md`. Compare the statistics of the PP groups under `workspace/***`, identify abnormal patterns, produce a quantitative analysis report, and write the result into a Markdown file.
+
+### Expert Parallel Group analysis
+
+The `workspace/***/trace/ep_group_stats` path contains profile traces and DHTA Pipeline + Expert Parallel statistics generated by `megatron_parallel_analysis`. The meaning of each CSV column can be found in the `ep_group_<ep-id>-pp_stage_<stage-id>.csv` EP aggregate statistics columns section of `megatron_parallel_analysis/README.md`. Compare the statistics of the EP groups under `workspace/`, identify abnormal patterns, produce a quantitative analysis report, and write the result into a Markdown file.
 
 ## Core modules
 
@@ -292,7 +357,7 @@ During initialization, it:
 3. uses `RankGenerator` to create DP / TP / PP rank groups;
 4. creates the workspace, output, log, and straggler directories;
 5. partitions trace files by PP group;
-6. assigns PP group tasks across MPI processes.
+6. assigns PP group or complete EP-group bundle tasks across MPI processes.
 
 For each PP group, it:
 
@@ -302,6 +367,13 @@ For each PP group, it:
 4. assigns micro batch IDs;
 5. establishes P2P links between adjacent pipeline stages;
 6. writes a communication trace JSON file and a CSV report.
+
+When EP analysis is enabled for a supported schedule, it additionally:
+
+1. maps each EP group to its source PP groups and PP stage without assuming rank arithmetic;
+2. assigns complete EP-group bundles to MPI workers;
+3. extracts rank-level forward/backward or VPP GPU timelines;
+4. writes merged EP traces and per-micro-batch cross-rank GPU timing statistics.
 
 ### `run_distributed_megatron_trace_analysis.py`
 
@@ -365,5 +437,6 @@ ETL data-cleaning command-line entrypoint. See the “ETL data cleaning” secti
 - `pipeline_parallel_utils.py`: helpers for pipeline stages, micro batches, and P2P communication.
 - `trace_filter_utils.py`: trace filtering utilities.
 - `call_graph_utils.py`: helpers for locating the main stack from an HTA `CallGraph`.
+- `trace_parse_cache.py`: reads, validates, and writes rank-level trace parse caches.
 - `utils.py`: general helpers for directory preparation and trace file partitioning.
 
