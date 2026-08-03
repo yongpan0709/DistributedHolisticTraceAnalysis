@@ -1,5 +1,6 @@
 import argparse
 import sys
+import traceback
 
 
 def parse_args():
@@ -66,8 +67,16 @@ def main():
             rebuild_parse_cache=args.rebuild_parse_cache,
         )
         dist_megatron_analysis.analyze(pp_group_id_range=pp_group_id_range)
-    except ValueError as error:
-        print(f"Error: {error}", file=sys.stderr)
+    except Exception:
+        print(
+            'Distributed Megatron trace analysis failed: '
+            f'trace_dir={args.trace_dir}, '
+            f'pp_group_id_range={pp_group_id_range}, '
+            f'mpi_args=(tp={args.tp}, pp={args.pp}, dp={args.dp}, ep={args.ep}, '
+            f'num_bs={args.num_bs}, vpp={args.vpp}, schedule={args.pp_schedule})',
+            file=sys.stderr,
+        )
+        traceback.print_exc()
         return 1
     return 0
 

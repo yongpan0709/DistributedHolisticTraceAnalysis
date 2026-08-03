@@ -387,51 +387,54 @@ class DistributedMegatronTraceAnalysis:
     def analyze_pipeline_parallel_per_group(self, pp_group_id: int, trace_dir: str):
         """
         Analyze pipeline parallel traces for a single group.
-        
         This method integrates the core functionality from MegatronPipelineParallelGroupTraceAnalysis.
-        
+
         Args:
             pp_group_id: Pipeline parallel group ID
             trace_dir: Directory containing trace files for this group
         """
         output_dir = os.path.join(trace_dir, 'output')
         prepare_directory(output_dir, force_clear=False)
-        
+
+        context = (
+            f'pp_group_id={pp_group_id}, mpi_rank={self.rank}, '
+            f'trace_dir={trace_dir}'
+        )
         logger.info(f'Analyzing pipeline parallel group {pp_group_id}')
-        
-        # Create pipeline trace object
-        pipeline_trace = self._create_pipeline_trace(trace_dir)
+        logger.info('PP-group analysis context: %s', context)
 
-        # Parse traces per PP group
-        logger.info('Construct CallGraph for traces')
-        pipeline_trace.parse_traces_per_pp_group(pp_group_id=pp_group_id)
+        try:
+            pipeline_trace = self._create_pipeline_trace(trace_dir)
 
-        # Filter communication-only spans
-        logger.info('Keep comm spans only')
-        pipeline_trace.filter_comm_only_traces(pp_group_id=pp_group_id)
-        
-        # Set micro batch IDs
-        logger.info('Set micro batch id')
-        pipeline_trace.set_micro_batch_id(pp_group_id=pp_group_id)
+            logger.info('Construct CallGraph for traces')
+            pipeline_trace.parse_traces_per_pp_group(pp_group_id=pp_group_id)
 
-        # Establish P2P links
-        logger.info('Establish P2P link on adjacent ranks')
-        pipeline_trace.establish_p2p_link_on_adjacent_ranks(pp_group_id=pp_group_id)
+            logger.info('Keep comm spans only')
+            pipeline_trace.filter_comm_only_traces(pp_group_id=pp_group_id)
 
-        # Save traces with P2P communication
-        logger.info('Save traces with P2P comm')
-        pipeline_trace.save_traces_with_p2p_comm(
-            f'{output_dir}/../../pp{pp_group_id}-trace.json',
-            traces=pipeline_trace.traces_comm_only
-        )
-        
-        # Generate report
-        logger.info('Generate report')
-        pipeline_trace.generate_report(
-            pp_group_id, 
-            f'{output_dir}/../../report-pp{pp_group_id}.csv'
-        )
-        
+            logger.info('Set micro batch id')
+            pipeline_trace.set_micro_batch_id(pp_group_id=pp_group_id)
+
+            logger.info('Establish P2P link on adjacent ranks')
+            pipeline_trace.establish_p2p_link_on_adjacent_ranks(pp_group_id=pp_group_id)
+
+            logger.info('Save traces with P2P comm')
+            pipeline_trace.save_traces_with_p2p_comm(
+                f'{output_dir}/../../pp{pp_group_id}-trace.json',
+                traces=pipeline_trace.traces_comm_only
+            )
+
+            logger.info('Generate report')
+            pipeline_trace.generate_report(
+                pp_group_id,
+                f'{output_dir}/../../report-pp{pp_group_id}.csv'
+            )
+        except Exception as error:
+            raise RuntimeError(
+                'Pipeline parallel analysis failed '
+                f'({context})'
+            ) from error
+
         return pipeline_trace
 
     def process_single_pp_group(self, pp_group_id: int, trace_dir: str):

@@ -38,8 +38,28 @@ def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_
     full_df = main_stack.full_df.copy()
     del cg
     del t
-    #Todo: ProfilerStep col kernel span has a wrong value 
-    full_df.loc[full_df['s_name'].str.contains(r'^ProfilerStep#.*'), 'kernel_span'] = full_df[full_df['s_name'].str.match(pat=r"^megatron/training/training.py\(\d+\): pretrain$")]['kernel_span'].values
+    #Todo: ProfilerStep col kernel span has a wrong value
+    profiler_step_mask = full_df['s_name'].str.contains(r'^ProfilerStep#.*')
+    pretrain_mask = full_df['s_name'].str.match(
+        pat=r"^megatron/training/training.py\(\d+\): pretrain$"
+    )
+    profiler_step_count = int(profiler_step_mask.sum())
+    pretrain_rows = full_df.loc[pretrain_mask, ['s_name', 'ts', 'dur', 'kernel_span']]
+    pretrain_count = len(pretrain_rows)
+    if profiler_step_count > 0:
+        if profiler_step_count == pretrain_count:
+            full_df.loc[profiler_step_mask, 'kernel_span'] = pretrain_rows['kernel_span'].to_numpy()
+        elif pretrain_count == 0:
+            # Only user annotation, but set PROFILER_WITH_STACK=0
+            logger.warning(
+                'Skipping ProfilerStep kernel_span override because counts do not match: '
+                'rank=%s, trace_file=%s, profiler_steps=%s',
+                rank_id,
+                trace_file,
+                profiler_step_count,
+            )
+    else:
+        raise RuntimeError('ProfilerStep annotations not found in trace, cannot override kernel_span values')
     return rank_id, full_df[full_df['s_cat'] == 'user_annotation' ]
 
 # Todo: Does the pp group trace class need to know information about other tp, ep, dp groups?
