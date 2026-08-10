@@ -213,7 +213,11 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             'reduce_max_stat_across_model_parallel_group',
             'should_run_forward_backward',
             # 'mccl:reduce_scatter_tensor_coalesced',
-            # 'mccl:all_reduce',
+            # For debug
+            'mccl:all_reduce',
+            'mccl:all_to_all',
+            'Memcpy1 DtoH (Device -> Pinned)',
+            'Memcpy1 HtoD (Pinned -> Device)'
         ]
         filter_comm = NameFilter(create_regex_for_full_match(comm_names_list))
         return filter_comm(trace_df)
@@ -366,7 +370,14 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         return f"{row['s_name']}_mb{int(micro_batch_id)}_vpp{abs(int(vpp_stage_id))}"
 
     # Todo: 增加 fwd step和bwd step batch num and flow
-    def save_trace_df_to_file(self, df: pd.DataFrame, output_file: str, trace_df_p2p_comm_flow: pd.DataFrame=None, meta_data: dict=None, pp_schedule: str='1f1b'):
+    def save_trace_df_to_file(
+        self,
+        df: pd.DataFrame,
+        output_file: str,
+        trace_df_p2p_comm_flow: pd.DataFrame = None,
+        meta_data: dict = None,
+        pp_schedule: str = '1f1b',
+    ):
         columns_to_keep = ['name', 'cat', 'pid', 'tid', 'ts', 'dur', 'rank']
         columns_to_drop = ['s_name', 's_cat']
         

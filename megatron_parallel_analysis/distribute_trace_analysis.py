@@ -7,6 +7,7 @@ import os
 import logging
 import math
 import pickle
+import re
 import shutil
 import time
 
@@ -274,6 +275,22 @@ class DistributedMegatronTraceAnalysis:
         self.stragglers_dir = os.path.join(self.output_dir, 'stragglers')
         self.log_dir = os.path.join(self.workspace_dir, self.workname, 'log')
         self.parse_cache_dir = os.path.join(self.workspace_dir, self.workname, 'cache')
+        self.cache_only_mode = (
+            not any(
+                name.endswith(('.json', '.json.gz'))
+                for name in os.listdir(self.trace_dir)
+            )
+            and os.path.isdir(self.parse_cache_dir)
+            and any(
+                re.fullmatch(r'rank\d+\.parse_cache\.pkl', name)
+                for name in os.listdir(self.parse_cache_dir)
+            )
+        )
+        if self.cache_only_mode:
+            logger.warning(
+                'Cache-only mode enabled: original traces are absent; '
+                'PP-group trace directories will not be created'
+            )
         if self.rank == 0:
             prepare_directory(self.trace_dir_pp_group, force_clear=False)
             if self._should_analyze_ep():
@@ -302,9 +319,17 @@ class DistributedMegatronTraceAnalysis:
         logger.info('Initializing pipeline parallel group subdirectories.')
         trace_dir_for_pp_group = os.path.join(self.trace_dir_pp_group, 'pp_group')
         self.all_pp_group_sub_dirs = [
-            f'{trace_dir_for_pp_group}_{i}' 
+            f'{trace_dir_for_pp_group}_{i}'
             for i in range(len(self.all_pipeline_parallel_group_ranks))
         ]
+        if self.cache_only_mode:
+            # The pipeline trace loader uses parse_cache_dir directly in this mode.
+            # Reuse one virtual path and avoid creating pp_group_<id> directories.
+            self.comm.Barrier()
+            logger.info(
+                'Cache-only mode: skipped partitioning traces into PP-group directories.'
+            )
+            return
 
         if self.rank == 0:
             partition_files_across_directories(

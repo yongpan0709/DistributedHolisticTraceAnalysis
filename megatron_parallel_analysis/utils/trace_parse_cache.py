@@ -41,7 +41,7 @@ def build_rank_parse_cache_metadata(
 
 def load_rank_parse_cache(
     cache_path: str,
-    expected_metadata: Dict[str, object],
+    expected_metadata: Optional[Dict[str, object]],
 ) -> Optional[pd.DataFrame]:
     if not os.path.exists(cache_path):
         return None
@@ -51,7 +51,7 @@ def load_rank_parse_cache(
             payload = pickle.load(cache_file)
         if not isinstance(payload, dict):
             raise ValueError('cache payload is not a dictionary')
-        if payload.get('metadata') != expected_metadata:
+        if expected_metadata is not None and payload.get('metadata') != expected_metadata:
             logger.info(f'Ignoring stale trace parse cache {cache_path}')
             return None
         full_df = payload.get('full_df')

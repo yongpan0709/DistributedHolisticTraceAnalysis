@@ -52,7 +52,11 @@ class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceB
             'logical_and_across_model_parallel_group',
             'reduce_max_stat_across_model_parallel_group',
             'should_run_forward_backward',
-            #'mccl:all_reduce'
+            # For debug
+            'mccl:all_reduce',
+            'mccl:all_to_all',
+            'Memcpy1 DtoH (Device -> Pinned)',
+            'Memcpy1 HtoD (Pinned -> Device)'
         ]
         filter_comm = NameFilter(create_regex_for_prefix_match(comm_names_list))
         return filter_comm(trace_df)
@@ -335,7 +339,7 @@ class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceB
             df_p2p_bidirection = self.get_p2p_trace_for_one_pair(rank_prev, rank_next)
             self.traces_p2p_comm[rank_prev] = df_p2p_bidirection
         
-        self.trace_df_p2p_flow_events = self.combine_into_one_trace(self.traces_p2p_comm)
+        # self.trace_df_p2p_flow_events = self.combine_into_one_trace(self.traces_p2p_comm)
     
     def calculate_step_times(self, all_forward_steps_df, all_backward_steps_df):
         forward_step_avg_time = all_forward_steps_df['kernel_span'].mean()/1000
