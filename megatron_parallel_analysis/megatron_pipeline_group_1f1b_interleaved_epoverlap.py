@@ -143,7 +143,11 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
         all_comm_df["end_ts"] = all_comm_df.first_kernel_start + all_comm_df.kernel_span
         all_comm_df["prev_end_ts"] = all_comm_df.end_ts.shift(1)
         all_comm_df["idle_interval"] = all_comm_df["first_kernel_start"] - all_comm_df["prev_end_ts"]
-        all_comm_df['idle_interval'].values[0] = self.full_dfs[rank].loc[self.full_dfs[rank]['s_name'].str.match(pat=r'^recv_forward$'), 'dur'].values[0]
+        first_event_index = all_comm_df.index[0]
+        first_recv_duration = self.full_dfs[rank].loc[
+            self.full_dfs[rank]['s_name'].str.match(pat=r'^recv_forward$'), 'dur'
+        ].iloc[0]
+        all_comm_df.loc[first_event_index, 'idle_interval'] = first_recv_duration
         return all_comm_df
 
     def calculate_step_times(self, fwdbwd_epoverlap_run_df, stage_id=0):
