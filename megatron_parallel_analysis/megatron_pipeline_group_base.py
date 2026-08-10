@@ -4,9 +4,10 @@
 import json
 import multiprocessing as mp
 import os
+import re
 import time
 from abc import ABC
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -87,7 +88,6 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         if trace_files is None:
             assert os.path.exists(trace_dir), f"Trace directory {trace_dir} does not exist!"
         self.trace_files = get_trace_files(trace_dir)
-        assert self.trace_files is not None and len(self.trace_files) > 0, f"No trace files found in directory {trace_dir}!"
         self.trace_dir = trace_dir
         self.tensor_parallel_size = tp
         self.data_parallel_size = dp
@@ -117,6 +117,23 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         self.is_parsed_per_pp_group: Dict[int, bool] = {}
         self.parse_cache_dir = parse_cache_dir
         self.rebuild_parse_cache = rebuild_parse_cache
+        self.cache_only_mode = False
+        if not self.trace_files and self.parse_cache_dir and not self.rebuild_parse_cache:
+            cached_trace_files = {}
+            for filename in os.listdir(self.parse_cache_dir):
+                match = re.fullmatch(r'rank(\d+)\.parse_cache\.pkl', filename)
+                if match:
+                    cached_trace_files[int(match.group(1))] = os.path.join(
+                        self.parse_cache_dir, filename
+                    )
+            if cached_trace_files:
+                self.trace_files = cached_trace_files
+                self.cache_only_mode = True
+                logger.warning(
+                    'No original trace files found under %s; using rank parse caches '
+                    'without metadata validation for temporary debugging',
+                    trace_dir,
+                )
 
     def _parse_rank_tasks(self, tasks):
         num_procs = min(mp.cpu_count(), len(tasks))
@@ -124,11 +141,15 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             return pool.starmap(parallel_callgraph_create, tasks)
 
     def _load_cached_rank(self, rank_id: int, trace_file: str):
-        metadata = build_rank_parse_cache_metadata(
-            rank_id, trace_file, self.bwd_annotation_str
-        )
-        cache_path = get_rank_parse_cache_path(self.parse_cache_dir, rank_id)
-        full_df = load_rank_parse_cache(cache_path, metadata)
+        if self.cache_only_mode:
+            cache_path = get_rank_parse_cache_path(self.parse_cache_dir, rank_id)
+            full_df = load_rank_parse_cache(cache_path, expected_metadata=None)
+        else:
+            metadata = build_rank_parse_cache_metadata(
+                rank_id, trace_file, self.bwd_annotation_str
+            )
+            cache_path = get_rank_parse_cache_path(self.parse_cache_dir, rank_id)
+            full_df = load_rank_parse_cache(cache_path, metadata)
         return None if full_df is None else full_df.copy(deep=True)
 
     def _write_cached_rank(
@@ -161,6 +182,11 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             if not self.rebuild_parse_cache:
                 full_df = self._load_cached_rank(rank_id, trace_file)
             if full_df is None:
+                if self.cache_only_mode:
+                    raise RuntimeError(
+                        f'Cache-only debugging mode requires a valid cache for rank {rank_id}: '
+                        f'{get_rank_parse_cache_path(self.parse_cache_dir, rank_id)}'
+                    )
                 tasks.append((rank_id, trace_file, self.bwd_annotation_str))
             else:
                 self.full_dfs[rank_id] = full_df
@@ -330,7 +356,8 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         new_df['ph'] = 'X'
         # Todo: in interleaved PP, send_fwd_recv_fwd and send_bwd_recv_bwd execute asyn and in parallel with fwd_step or bwd_step
         # so for displaying in perfetto, it muse set them with different tids.
-
+        new_df['args'] = df.apply(lambda row: {col: row[col] for col in row.index if col not in columns_to_keep + columns_to_drop}, axis=1)
+        
         trace_data = meta_data.copy() if meta_data is not None else {}
         trace_events = new_df.to_dict('records')
         #flow_events = convert_to_flow_events(trace_df_p2p_comm_flow)
@@ -370,8 +397,17 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
     @staticmethod
     def combine_into_one_trace(traces_dict: dict):
         all_trace_dfs = []
+        # Todo: debug performance issue, check if the memcpy names are correct
+        memcpy_names = [
+            'Memcpy1 DtoH (Device -> Pinned)',
+            'Memcpy1 HtoD (Pinned -> Device)',
+        ]
         for rank, trace_df in traces_dict.items():
             trace_df['rank'] = rank
+            forward_step_df = trace_df.loc[trace_df['s_name'] == 'forward_step']
+            if not forward_step_df.empty:
+                forward_step_pid = forward_step_df['pid'].iloc[0]
+                trace_df.loc[trace_df['s_name'].isin(memcpy_names), 'pid'] = forward_step_pid
             all_trace_dfs.append(trace_df)
         trace_df = pd.concat(all_trace_dfs, ignore_index=True)
         return trace_df
