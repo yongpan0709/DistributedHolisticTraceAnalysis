@@ -45,7 +45,7 @@ def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_
     profiler_step_count = int(profiler_step_mask.sum())
     pretrain_kernel_span = full_df.loc[pretrain_mask, 'kernel_span'].to_numpy()
     pretrain_count = len(pretrain_kernel_span)
-    result_df = full_df.loc[full_df['s_cat'] == 'user_annotation'].copy()
+    result_df = full_df.loc[full_df["s_cat"].isin(["user_annotation", "gpu_memcpy"])].copy()
     del main_stack
     del cg
     del t
