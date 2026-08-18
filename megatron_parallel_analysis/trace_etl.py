@@ -5,10 +5,6 @@ import re
 from copy import deepcopy
 from functools import partial
 
-from megatron_parallel_analysis.distribute_trace_analysis import (
-    DistributedMegatronTraceAnalysis,
-)
-
 
 # Todo: value missing in trace, like: '"Process Group Description": ,'
 def fix_json_value_missing(file_path):
@@ -97,7 +93,14 @@ def create_directory_if_not_exists(path):
     return path
 
 
-if __name__ == "__main__":
+def positive_int(value):
+    parsed_value = int(value)
+    if parsed_value <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return parsed_value
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Filter trace events and run distributed Megatron trace ETL.",
         usage=(
@@ -119,7 +122,21 @@ if __name__ == "__main__":
         default="1f1b",
         help="pipeline parallel schedule",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--etl-workers-per-rank",
+        type=positive_int,
+        default=8,
+        help="maximum ETL subprocesses per MPI rank (default: 8)",
+    )
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    from megatron_parallel_analysis.distribute_trace_analysis import (
+        DistributedMegatronTraceAnalysis,
+    )
 
     trace_dir = args.trace_dir.rstrip("/")
     redirect_path = create_directory_if_not_exists(trace_dir + "-etl")
@@ -139,4 +156,8 @@ if __name__ == "__main__":
         combined_pattern=combined_pattern,
         mooncake_p2p_pattern=mooncake_p2p_pattern,
     )
-    dist_megatron_analysis.pp_etl(redirect_path, filter_out_funcs_with_pattern)
+    dist_megatron_analysis.pp_etl(
+        redirect_path,
+        filter_out_funcs_with_pattern,
+        etl_workers_per_rank=args.etl_workers_per_rank,
+    )

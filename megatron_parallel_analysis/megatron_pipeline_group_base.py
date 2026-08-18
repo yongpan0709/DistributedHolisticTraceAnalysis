@@ -212,10 +212,19 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             f'hits={cache_hits}, rebuilt={rebuilt_ranks}'
         )
 
-    def etl_traces_per_pp_group(self, redirect_trace_dir, filter_out_funcs, pp_group_id=0) -> None:
+    def etl_traces_per_pp_group(
+        self,
+        redirect_trace_dir,
+        filter_out_funcs,
+        pp_group_id=0,
+        max_workers=2,
+    ) -> None:
         if self.is_parsed_per_pp_group.get(pp_group_id, False):
             logger.warning("Traces are already parsed and loaded!")
             return
+        if max_workers <= 0:
+            raise ValueError(f'max_workers must be greater than 0; got {max_workers}')
+
         tasks = []
         t0 = time.perf_counter()
         for rank in self.all_pipeline_parallel_group_ranks[pp_group_id]:
@@ -224,13 +233,30 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             filename = os.path.basename(trace_file)
             redirect_new_trace_path = os.path.join(redirect_trace_dir, filename)
             tasks.append((trace_file, redirect_new_trace_path))
-        num_procs = min(mp.cpu_count(), len(self.all_pipeline_parallel_group_ranks[pp_group_id]))
+
+        if not tasks:
+            logger.info('ETL pp group %s has no trace files', pp_group_id)
+            self.is_parsed_per_pp_group[pp_group_id] = True
+            return
+
+        num_procs = min(max_workers, mp.cpu_count(), len(tasks))
+        logger.info(
+            'Starting ETL pp group %s: files=%s, workers=%s',
+            pp_group_id,
+            len(tasks),
+            num_procs,
+        )
         with mp.get_context("fork").Pool(num_procs) as pool:
-            results = pool.starmap(filter_out_funcs, tasks)
-            pool.close()
-            pool.join()
-        t1 = time.perf_counter()
-        logger.debug(f"calculating critical path took {t1 - t0:2f} seconds")
+            pool.starmap(filter_out_funcs, tasks)
+
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            'ETL pp group %s completed in %.3f seconds: files=%s, workers=%s',
+            pp_group_id,
+            elapsed,
+            len(tasks),
+            num_procs,
+        )
         self.is_parsed_per_pp_group[pp_group_id] = True
 
     # @abstractmethod

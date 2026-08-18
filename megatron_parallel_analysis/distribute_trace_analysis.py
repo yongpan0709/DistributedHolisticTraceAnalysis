@@ -1042,39 +1042,67 @@ class DistributedMegatronTraceAnalysis:
                 plt.savefig(filename)
                 plt.close(fig)
 
-    def etl_single_pp_group(self, pp_group_id: int, target_trace_dir: str, filter_out_funcs):
+    def etl_single_pp_group(
+        self,
+        pp_group_id: int,
+        target_trace_dir: str,
+        filter_out_funcs,
+        etl_workers_per_rank: int = 2,
+    ):
         """
         ETL for a single pipeline parallel group.
-        
+
         Args:
             pp_group_id: Pipeline parallel group ID
             target_trace_dir: Target trace directory
             filter_out_funcs: Functions to filter out traces
+            etl_workers_per_rank: Maximum ETL subprocesses per MPI rank
         """
-        logger.info(f"pp_group_id: {pp_group_id}, in target trace dir: {target_trace_dir}")
+        logger.info(
+            'ETL pp group %s: target_trace_dir=%s, max_workers=%s',
+            pp_group_id,
+            target_trace_dir,
+            etl_workers_per_rank,
+        )
         t = MegatronPipelineParallelGroupTraceBase(
-            None, self.trace_dir, 
-            dp=self.expert_data_parallel_size, 
-            tp=self.tensor_parallel_size, 
-            pp=self.pipeline_parallel_size, 
-            ep=self.expert_model_parallel_size, 
+            None, self.trace_dir,
+            dp=self.expert_data_parallel_size,
+            tp=self.tensor_parallel_size,
+            pp=self.pipeline_parallel_size,
+            ep=self.expert_model_parallel_size,
             cp=self.context_parallel_size
         )
-        t.etl_traces_per_pp_group(target_trace_dir, filter_out_funcs, pp_group_id=pp_group_id)
+        t.etl_traces_per_pp_group(
+            target_trace_dir,
+            filter_out_funcs,
+            pp_group_id=pp_group_id,
+            max_workers=etl_workers_per_rank,
+        )
 
-    def pp_etl(self, target_trace_dir: str, filter_out_funcs):
+    def pp_etl(
+        self,
+        target_trace_dir: str,
+        filter_out_funcs,
+        etl_workers_per_rank: int = 2,
+    ):
         """
         ETL for all assigned pipeline parallel groups.
 
         Args:
             target_trace_dir: Target trace directory
             filter_out_funcs: Functions to filter out traces
+            etl_workers_per_rank: Maximum ETL subprocesses per MPI rank
         """
         tasks = list(enumerate(self.all_pp_group_sub_dirs))
         assigned_tasks = self._tasks_for_worker(tasks, self.rank, self.world_size)
         for pp_group_id, _ in assigned_tasks:
             logger.info(f'ETL pp group {pp_group_id}')
-            self.etl_single_pp_group(pp_group_id, target_trace_dir, filter_out_funcs)
+            self.etl_single_pp_group(
+                pp_group_id,
+                target_trace_dir,
+                filter_out_funcs,
+                etl_workers_per_rank=etl_workers_per_rank,
+            )
 
     def post_process(self):
         """Post-processing after analysis completion."""
