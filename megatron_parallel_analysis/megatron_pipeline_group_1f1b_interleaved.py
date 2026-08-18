@@ -230,7 +230,10 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         logger.info(f'[1F1B interleaved] Todo: establish p2p link on adjacent ranks for pp_group_id {pp_group_id}')
     
     def get_all_comm_df(self, sorted_trace_df, rank=None):
-        all_comm_df = sorted_trace_df[sorted_trace_df['num_kernels'] > 0]
+        all_comm_df = sorted_trace_df[
+            (sorted_trace_df['num_kernels'] > 0)
+            & (sorted_trace_df['s_cat'] == 'user_annotation')
+        ]
         all_comm_df = all_comm_df.sort_values(by="first_kernel_start")
         """
         Calculate idle intervals for communication events.
