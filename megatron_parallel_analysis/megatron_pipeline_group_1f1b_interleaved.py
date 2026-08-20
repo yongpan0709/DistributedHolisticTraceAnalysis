@@ -400,7 +400,6 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
 
         trace_data = meta_data.copy() if meta_data is not None else {}
         trace_events = new_df.to_dict('records')
-        #flow_events = convert_to_flow_events(trace_df_p2p_comm_flow)
         metadata_events = MegatronPipelineParallelGroupTraceBase.generate_metadata_events([tuple(x) for x in new_df[['rank', 'pid']].drop_duplicates().to_records(index=False)])
         trace_data["traceEvents"] = trace_events + metadata_events
         

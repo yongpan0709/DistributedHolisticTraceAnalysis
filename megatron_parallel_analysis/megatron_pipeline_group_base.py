@@ -449,7 +449,6 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         
         trace_data = meta_data.copy() if meta_data is not None else {}
         trace_events = new_df.to_dict('records')
-        #flow_events = convert_to_flow_events(trace_df_p2p_comm_flow)
         metadata_events = MegatronPipelineParallelGroupTraceBase.generate_metadata_events([tuple(x) for x in new_df[['rank', 'pid']].drop_duplicates().to_records(index=False)])
         trace_data["traceEvents"] = trace_events + metadata_events
         
@@ -627,75 +626,3 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             )
         #print(output_df)
         return output_df
-
-def convert_to_flow_events(trace_df_p2p_comm_flow: pd.DataFrame):
-    if trace_df_p2p_comm_flow is None: return []
-    
-    df_p2p_forward = trace_df_p2p_comm_flow[trace_df_p2p_comm_flow['p2p_forward'] == True]
-    df_p2p_backward = trace_df_p2p_comm_flow[trace_df_p2p_comm_flow['p2p_backward'] == True]
-
-    send_forward_pd = pd.DataFrame({
-        'cat': 'p2p_forward',
-        'name': 'p2p_forward',
-        'ph': 's',
-        'pid': df_p2p_forward['pid_on_prev'],
-        'tid': df_p2p_forward['tid_on_prev'],
-        'ts': np.maximum(df_p2p_forward['ts_on_prev'], df_p2p_forward['ts_on_next']),
-        'id': df_p2p_forward.index,
-        'args': [
-            {'micro_batch_id': micro_batch_id}
-            for micro_batch_id in df_p2p_forward['micro_batch_id_forward_on_prev']
-        ]
-    })
-    
-    send_backward_pd = pd.DataFrame({
-        'cat': 'p2p_backward',
-        'name': 'p2p_backward',
-        'ph': 's',
-        'pid': df_p2p_backward['pid_on_next'],
-        'tid': df_p2p_backward['tid_on_next'],
-        'ts': np.maximum(df_p2p_backward['ts_on_prev'], df_p2p_backward['ts_on_next']),
-        'id': df_p2p_backward.index,
-        'args': [
-            {'micro_batch_id': micro_batch_id}
-            for micro_batch_id in df_p2p_backward['micro_batch_id_backward_on_prev']
-        ]
-    })
-
-    recv_forward_pd = pd.DataFrame({
-        'cat': 'p2p_forward',
-        'name': 'p2p_forward',
-        'ph': 'f',
-        'pid': df_p2p_forward['pid_on_next'],
-        'tid': df_p2p_forward['tid_on_next'],
-        'ts': df_p2p_forward['ts_on_next'] + df_p2p_forward['dur_on_next'],
-        'id': df_p2p_forward.index,
-        'bp': 'e',
-        'args': [
-            {'micro_batch_id': micro_batch_id}
-            for micro_batch_id in df_p2p_forward['micro_batch_id_forward_on_prev']
-        ]
-    })
-
-    recv_backward_pd = pd.DataFrame({
-        'cat': 'p2p_backward',
-        'name': 'p2p_backward',
-        'ph': 'f',
-        'pid': df_p2p_backward['pid_on_prev'],
-        'tid': df_p2p_backward['tid_on_prev'],
-        'ts': df_p2p_backward['ts_on_prev'] + df_p2p_backward['dur_on_prev'],
-        'id': df_p2p_backward.index,
-        'bp': 'e',
-        'args': [
-            {'micro_batch_id': micro_batch_id}
-            for micro_batch_id in df_p2p_backward['micro_batch_id_backward_on_prev']
-        ]
-    })
-
-    total_dicts = [
-        item
-        for pd in [send_forward_pd, send_backward_pd, recv_forward_pd, recv_backward_pd]
-        for item in pd.to_dict('records')
-    ]
-
-    return total_dicts
