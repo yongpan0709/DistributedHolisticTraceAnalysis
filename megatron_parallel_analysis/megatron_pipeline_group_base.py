@@ -29,6 +29,16 @@ from megatron_parallel_analysis.utils.trace_parse_cache import (
 )
 
 
+def get_trace_workname(trace_dir: str) -> str:
+    """Build a collision-resistant workspace name for a trace directory."""
+    trace_dir = os.path.normpath(trace_dir)
+    trace_name = os.path.basename(trace_dir)
+    if re.fullmatch(r"iteration_\d+", trace_name):
+        parent_name = os.path.basename(os.path.dirname(trace_dir))
+        return f"{parent_name}_{trace_name}"
+    return trace_name
+
+
 def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_step'):
     logger.debug(f'rank id: {rank_id}, trace_file: {trace_file}')
     t = Trace(trace_files={rank_id: trace_file}, trace_dir="")

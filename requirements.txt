@@ -8,4 +8,5 @@ pydot>=1.3.0  # required by third_party/param/
 pytest>=7.4.4
 seaborn>=0.13.2
 mpi4py>=3.1.4
+ijson==3.5.1
 matplotlib>=3.10.8

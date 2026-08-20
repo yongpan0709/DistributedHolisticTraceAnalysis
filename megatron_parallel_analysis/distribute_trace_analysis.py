@@ -23,7 +23,10 @@ from hta.configs.config import logger
 from megatron_parallel_analysis.megatron_pipeline_group_1f1b_interleaved_epoverlap import MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace
 from megatron_parallel_analysis.megatron_pipeline_group_1f1b import MegatronPipelineParallel1F1BGroupTrace
 from megatron_parallel_analysis.megatron_pipeline_group_1f1b_interleaved import MegatronPipelineParallel1F1BInterleavedGroupTrace
-from megatron_parallel_analysis.megatron_pipeline_group_base import MegatronPipelineParallelGroupTraceBase
+from megatron_parallel_analysis.megatron_pipeline_group_base import (
+    MegatronPipelineParallelGroupTraceBase,
+    get_trace_workname,
+)
 
 
 MAX_INT = 2**31 - 1  # Maximum size for each chunk
@@ -267,7 +270,7 @@ class DistributedMegatronTraceAnalysis:
     def setup_dirs(self):
         """Setup directory structure for analysis."""
         self.workspace_dir = 'workspace'
-        self.workname = os.path.basename(self.trace_dir)
+        self.workname = get_trace_workname(self.trace_dir)
         self.trace_dir_pp_group = os.path.join(self.workspace_dir, self.workname, 'trace')
         self.ep_group_stats_dir = os.path.join(self.trace_dir_pp_group, 'ep_group_stats')
         self.ep_trace_dir = os.path.join(self.trace_dir_pp_group, 'ep_trace')
