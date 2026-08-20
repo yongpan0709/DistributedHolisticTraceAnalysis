@@ -212,6 +212,63 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             f'hits={cache_hits}, rebuilt={rebuilt_ranks}'
         )
 
+    def _align_pp_group_by_first_kernel_start(
+        self, traces: Dict[int, pd.DataFrame]
+    ) -> None:
+        """Align trace timelines using the earliest valid GPU kernel start.
+
+        PP analysis and exported traces use ``first_kernel_start`` computed
+        from the call graph. Shift both the call-graph timestamps and their CPU
+        timeline while keeping no-kernel sentinel values intact.
+        """
+        min_start = None
+        for rank, df in traces.items():
+            raw_starts = df['first_kernel_start']
+            starts = pd.to_numeric(raw_starts, errors='coerce')
+            invalid_mask = raw_starts.notna() & (
+                starts.isna() | ~np.isfinite(starts)
+            )
+            if invalid_mask.any():
+                logger.warning(
+                    'Ignoring invalid first_kernel_start values: '
+                    'rank=%s, count=%s, samples=%s',
+                    rank,
+                    int(invalid_mask.sum()),
+                    raw_starts.loc[invalid_mask].head(5).to_dict(),
+                )
+
+            finite_starts = np.isfinite(starts)
+            if 'num_kernels' in df:
+                has_kernels = pd.to_numeric(
+                    df['num_kernels'], errors='coerce'
+                ).fillna(0) > 0
+                if (has_kernels & finite_starts & (starts == 0)).any():
+                    return
+                valid_starts = starts[
+                    has_kernels & finite_starts & (starts > 0)
+                ]
+            else:
+                valid_starts = starts[finite_starts & (starts > 0)]
+            if not valid_starts.empty:
+                rank_min_start = valid_starts.min()
+                if min_start is None or rank_min_start < min_start:
+                    min_start = rank_min_start
+
+        if min_start is None:
+            return
+
+        offset = min_start
+        for df in traces.values():
+            for column in ('ts', 'end'):
+                if column in df:
+                    df[column] = df[column] - offset
+            for column in ('first_kernel_start', 'last_kernel_end'):
+                if column not in df:
+                    continue
+                values = pd.to_numeric(df[column], errors='coerce')
+                valid = values > 0
+                df.loc[valid, column] = values[valid] - offset
+
     def etl_traces_per_pp_group(
         self,
         redirect_trace_dir,
@@ -371,6 +428,7 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         #    trace_df_p2p_flow_events = self.trace_df_p2p_flow_events
         #if meta_data is None:
         #    meta_data = self.meta_data
+        self._align_pp_group_by_first_kernel_start(traces)
         trace_df_all_ranks = self.combine_into_one_trace(traces)
         self.save_trace_df_to_file(trace_df_all_ranks, save_path) # Todo: enhance flow event:, trace_df_p2p_flow_events)
     
@@ -379,6 +437,7 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         columns_to_drop = ['s_name', 's_cat']
         
         new_df = df[columns_to_keep].copy()
+        # Todo: need to handle cases when first_kernel_start <= 0, and verify if there is no kernel executed
         new_df['ts'] = df['first_kernel_start'].where(df['first_kernel_start'] > 0, df['ts'])
         new_df['dur'] = df['kernel_span'].where(df['kernel_span'] > 0, df['dur'])
         new_df['name'] = df['s_name']
