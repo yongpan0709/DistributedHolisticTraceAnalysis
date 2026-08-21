@@ -284,7 +284,7 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         redirect_trace_dir,
         filter_out_funcs,
         pp_group_id=0,
-        max_workers=2,
+        max_workers=16,
     ) -> None:
         if self.is_parsed_per_pp_group.get(pp_group_id, False):
             logger.warning("Traces are already parsed and loaded!")

@@ -1050,7 +1050,7 @@ class DistributedMegatronTraceAnalysis:
         pp_group_id: int,
         target_trace_dir: str,
         filter_out_funcs,
-        etl_workers_per_rank: int = 2,
+        etl_workers_per_rank: int = 16,
     ):
         """
         ETL for a single pipeline parallel group.
@@ -1086,7 +1086,7 @@ class DistributedMegatronTraceAnalysis:
         self,
         target_trace_dir: str,
         filter_out_funcs,
-        etl_workers_per_rank: int = 2,
+        etl_workers_per_rank: int = 16,
     ):
         """
         ETL for all assigned pipeline parallel groups.

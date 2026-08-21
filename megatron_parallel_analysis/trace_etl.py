@@ -2,8 +2,12 @@ import argparse
 import json
 import os
 import re
-from copy import deepcopy
-from functools import partial
+from functools import lru_cache, partial
+import ijson
+from ijson.common import ObjectBuilder
+
+from megatron_parallel_analysis.megatron_pipeline_group_base import get_trace_workname
+
 
 
 # Todo: value missing in trace, like: '"Process Group Description": ,'
@@ -59,38 +63,133 @@ FILTER_OUT_FUNCS_FOR_EPOVERLAP = [
 
 FILTER_OUT_FUNCS_FOR_EPOVERLAP_PATTERN = "|".join(FILTER_OUT_FUNCS_FOR_EPOVERLAP)
 
+@lru_cache(maxsize=1)
+def require_yajl2_c_backend():
+    """Require the compiled YAJL backend for streaming ETL."""
+    print(
+        f"ijson version: {ijson.__version__}, "
+        f"backend: {ijson.backend}"
+    )
+    if ijson.backend != "yajl2_c":
+        raise RuntimeError(
+            "ijson backend must be 'yajl2_c', "
+            f"but got {ijson.backend!r}"
+        )
+
+
+def _build_json_value(parser, event, value):
+    builder = ObjectBuilder()
+    builder.event(event, value)
+    if event not in {"start_map", "start_array"}:
+        return builder.value
+
+    depth = 1
+    for _, nested_event, nested_value in parser:
+        builder.event(nested_event, nested_value)
+        if nested_event in {"start_map", "start_array"}:
+            depth += 1
+        elif nested_event in {"end_map", "end_array"}:
+            depth -= 1
+            if depth == 0:
+                return builder.value
+
+    raise ValueError("unexpected end of JSON while parsing a value")
+
+
+def _write_trace_events(parser, output, combined_pattern, mooncake_p2p_pattern):
+    first_event = True
+    for _, event, value in parser:
+        if event == "end_array":
+            return
+
+        item = _build_json_value(parser, event, value)
+        if not isinstance(item, dict):
+            raise ValueError("traceEvents entries must be JSON objects")
+
+        name = item.get("name")
+        if name is not None:
+            if re.match(combined_pattern, name):
+                continue
+            if re.match(mooncake_p2p_pattern, name):
+                item["cat"] = "user_annotation"
+
+        if not first_event:
+            output.write(",")
+        json.dump(item, output)
+        first_event = False
+
+    raise ValueError("unexpected end of JSON while parsing traceEvents")
+
+
 def filter_out_funcs(
     file_path,
     redirect_new_trace_path,
     combined_pattern=COMBINED_PATTERN,
     mooncake_p2p_pattern=MOONCAKE_P2P_PATTERN,
 ):
+    require_yajl2_c_backend()
     print(f"redirect_new_trace_path: {redirect_new_trace_path}")
     #fix_json_value_missing(file_path)
-    with open(file_path, "r", encoding="utf-8") as file:
-        data = json.load(file)
+    with open(file_path, "rb") as source, open(
+        redirect_new_trace_path, "w", encoding="utf-8"
+    ) as output:
+        parser = iter(ijson.parse(source, use_float=True))
+        try:
+            prefix, event, _ = next(parser)
+        except StopIteration as error:
+            raise ValueError("trace file is empty") from error
+        if prefix != "" or event != "start_map":
+            raise ValueError("trace file must contain a top-level JSON object")
 
-    dup_data = {}
-    for key, value in data.items():
-        if key == "traceEvents":
-            dup_data.setdefault("traceEvents", [])
-            for item in value:
-                if "name" in item:
-                    if re.match(combined_pattern, item["name"]):
-                        continue
-                    if re.match(mooncake_p2p_pattern, item["name"]):
-                        item["cat"] = "user_annotation"
-                dup_data["traceEvents"].append(deepcopy(item))
-        else:
-            dup_data[key] = deepcopy(value)
+        output.write("{")
+        first_key = True
+        for prefix, event, value in parser:
+            if prefix == "" and event == "end_map":
+                output.write("}")
+                return
+            if prefix != "" or event != "map_key":
+                raise ValueError("invalid top-level trace JSON structure")
 
-    with open(redirect_new_trace_path, "w", encoding="utf-8") as file:
-        json.dump(dup_data, file, indent="\t")
+            key = value
+            try:
+                _, value_event, value = next(parser)
+            except StopIteration as error:
+                raise ValueError(f"missing value for top-level key {key!r}") from error
+
+            if not first_key:
+                output.write(",")
+            json.dump(key, output)
+            output.write(":")
+            first_key = False
+
+            if key == "traceEvents":
+                if value_event != "start_array":
+                    raise ValueError("traceEvents must be a JSON array")
+                output.write("[")
+                _write_trace_events(
+                    parser, output, combined_pattern, mooncake_p2p_pattern
+                )
+                output.write("]")
+            else:
+                json.dump(
+                    _build_json_value(parser, value_event, value),
+                    output,
+                )
+
+    raise ValueError("unexpected end of JSON while parsing top-level object")
 
 
 def create_directory_if_not_exists(path):
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def build_redirect_path(trace_dir):
+    trace_dir = os.path.normpath(trace_dir)
+    return os.path.join(
+        os.path.dirname(trace_dir),
+        f"{get_trace_workname(trace_dir)}-etl",
+    )
 
 
 def positive_int(value):
@@ -125,8 +224,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--etl-workers-per-rank",
         type=positive_int,
-        default=8,
-        help="maximum ETL subprocesses per MPI rank (default: 8)",
+        default=16,
+        help="maximum ETL subprocesses per MPI rank (default: 16)",
     )
     return parser.parse_args(argv)
 
@@ -138,8 +237,8 @@ if __name__ == "__main__":
         DistributedMegatronTraceAnalysis,
     )
 
-    trace_dir = args.trace_dir.rstrip("/")
-    redirect_path = create_directory_if_not_exists(trace_dir + "-etl")
+    trace_dir = os.path.normpath(args.trace_dir)
+    redirect_path = create_directory_if_not_exists(build_redirect_path(trace_dir))
     print(f"Origin Trace_dir: {trace_dir}, After filtering Dir: {redirect_path}")
 
     dist_megatron_analysis = DistributedMegatronTraceAnalysis(
