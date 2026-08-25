@@ -496,16 +496,16 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
     def combine_into_one_trace(traces_dict: dict):
         all_trace_dfs = []
         # Todo: debug performance issue, check if the memcpy names are correct
-        memcpy_names = [
-            'Memcpy1 DtoH (Device -> Pinned)',
-            'Memcpy1 HtoD (Pinned -> Device)',
-        ]
+        # memcpy_names = [
+        #     'Memcpy1 DtoH (Device -> Pinned)',
+        #     'Memcpy1 HtoD (Pinned -> Device)',
+        # ]
         for rank, trace_df in traces_dict.items():
             trace_df['rank'] = rank
             forward_step_df = trace_df.loc[trace_df['s_name'] == 'forward_step']
             if not forward_step_df.empty:
                 forward_step_pid = forward_step_df['pid'].iloc[0]
-                trace_df.loc[trace_df['s_name'].isin(memcpy_names), 'pid'] = forward_step_pid
+                # trace_df.loc[trace_df['s_name'].isin(memcpy_names), 'pid'] = forward_step_pid
             all_trace_dfs.append(trace_df)
         trace_df = pd.concat(all_trace_dfs, ignore_index=True)
         return trace_df

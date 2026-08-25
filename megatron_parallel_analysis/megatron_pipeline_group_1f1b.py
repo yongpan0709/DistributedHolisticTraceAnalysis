@@ -53,10 +53,10 @@ class MegatronPipelineParallel1F1BGroupTrace(MegatronPipelineParallelGroupTraceB
             'reduce_max_stat_across_model_parallel_group',
             'should_run_forward_backward',
             # For debug
-            'mccl:all_reduce',
-            'mccl:all_to_all',
-            'Memcpy1 DtoH (Device -> Pinned)',
-            'Memcpy1 HtoD (Pinned -> Device)'
+            # 'mccl:all_reduce',
+            # 'mccl:all_to_all',
+            # 'Memcpy1 DtoH (Device -> Pinned)',
+            # 'Memcpy1 HtoD (Pinned -> Device)'
         ]
         filter_comm = NameFilter(create_regex_for_prefix_match(comm_names_list))
         return filter_comm(trace_df)

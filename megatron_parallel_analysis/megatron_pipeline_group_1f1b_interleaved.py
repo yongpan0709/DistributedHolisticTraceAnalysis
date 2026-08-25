@@ -214,10 +214,10 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             'should_run_forward_backward',
             # 'mccl:reduce_scatter_tensor_coalesced',
             # For debug
-            'mccl:all_reduce',
-            'mccl:all_to_all',
-            'Memcpy1 DtoH (Device -> Pinned)',
-            'Memcpy1 HtoD (Pinned -> Device)'
+            # 'mccl:all_reduce',
+            # 'mccl:all_to_all',
+            # 'Memcpy1 DtoH (Device -> Pinned)',
+            # 'Memcpy1 HtoD (Pinned -> Device)'
         ]
         filter_comm = NameFilter(create_regex_for_full_match(comm_names_list))
         return filter_comm(trace_df)
