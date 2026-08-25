@@ -233,14 +233,14 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
         """
         min_start = None
         for rank, df in traces.items():
-            raw_starts = df['first_kernel_start']
+            raw_starts = df['ts']
             starts = pd.to_numeric(raw_starts, errors='coerce')
             invalid_mask = raw_starts.notna() & (
                 starts.isna() | ~np.isfinite(starts)
             )
             if invalid_mask.any():
                 logger.warning(
-                    'Ignoring invalid first_kernel_start values: '
+                    'Ignoring invalid start timestamp values: '
                     'rank=%s, count=%s, samples=%s',
                     rank,
                     int(invalid_mask.sum()),
