@@ -26,6 +26,12 @@ def parse_args():
     parser.add_argument("--num-bs", type=int, default=16, help="number of micro batches")
     parser.add_argument("--vpp", type=int, default=2, help="virtual pipeline parallel size")
     parser.add_argument(
+        "--microbatch-group-size-per-virtual-pipeline-stage",
+        type=int,
+        default=None,
+        help="contiguous micro-batches executed per virtual pipeline stage; defaults to PP size",
+    )
+    parser.add_argument(
         "--enable_ep_analysis",
         action="store_true",
         help="enable EP analysis for MoE models (disabled by default)",
@@ -63,6 +69,7 @@ def main():
             pp_schedule=args.pp_schedule,
             vpp_size=args.vpp,
             micro_bs=args.num_bs,
+            microbatch_group_size_per_vp_stage=args.microbatch_group_size_per_virtual_pipeline_stage,
             enable_ep_analysis=args.enable_ep_analysis,
             rebuild_parse_cache=args.rebuild_parse_cache,
         )

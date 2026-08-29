@@ -45,10 +45,15 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
         micro_bs = 0,
         parse_cache_dir: Optional[str] = None,
         rebuild_parse_cache: bool = False,
+        microbatch_group_size_per_vp_stage: Optional[int] = None,
         ) -> None:
         super().__init__(trace_files, trace_dir, dp, tp, pp, ep, cp, order, micro_bs, parse_cache_dir=parse_cache_dir, rebuild_parse_cache=rebuild_parse_cache)
         #self.pp_schedule = pp_schedule
         self.vpp_size = vpp_size
+        self.microbatch_group_size_per_vp_stage = (
+            pp if microbatch_group_size_per_vp_stage is None
+            else microbatch_group_size_per_vp_stage
+        )
 
     def preprocess_trace_df(self, rank):
         #trace_df = self.full_dfs[rank]
@@ -71,8 +76,8 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
     #    trace_df.sort_values(by=['ts', 'dur'], ascending=[True, False], inplace=True)
     #    trace_df['vpp_stage_id'] = 0
     #    num_microbatches = self.get_num_microbatches()
-    #    num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(num_microbatches, self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
-    #    schedule_table = get_schedule_table(num_microbatches, self.vpp_size, self.pipeline_parallel_size)
+    #    num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(num_microbatches, self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
+    #    schedule_table = get_schedule_table(num_microbatches, self.vpp_size, self.microbatch_group_size_per_vp_stage)
     #    fwd_order, bwd_order, _ = convert_schedule_table_to_order(num_warmup_microbatches, self.vpp_size, schedule_table)
     #    trace_df.loc[trace_df['s_name'].str.match(pat=r'^forward_step$'), 'vpp_stage_id'] = fwd_order
     #    trace_df.loc[trace_df['s_name'].str.match(pat=r'^backward_step$'), 'vpp_stage_id'] = bwd_order
@@ -152,7 +157,7 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
 
     def calculate_step_times(self, fwdbwd_epoverlap_run_df, stage_id=0):
         num_microbatch = self.get_num_microbatches()
-        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(num_microbatch, self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(num_microbatch, self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         fwdbwd_warmup_step = fwdbwd_epoverlap_run_df[:num_warmup_microbatches]
         fwdbwd_steady_step = fwdbwd_epoverlap_run_df[num_warmup_microbatches:-num_warmup_microbatches]
         fwdbwd_cooldown_step = fwdbwd_epoverlap_run_df[-num_warmup_microbatches:]
@@ -178,12 +183,12 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
             return all_comm_time_df.loc[theoretical_bubble_head_index, 'dur'].sum()/1000
 
     def calculate_bubble_time_warmup(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         fwd_step_in_head = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^fwdbwd_epoverlap_run$')].index[1:num_warmup_microbatches]
         return all_comm_time_df.loc[fwd_step_in_head, 'idle_interval'].sum()/1000
     
     def calculate_theoretical_bubble_time_steady(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         if stage_id == self.pipeline_parallel_size-1:
             return 0.0
         else:
@@ -194,7 +199,7 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
                 return 0.0
 
     def calculate_bubble_time_steady(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         fwdbwd_step_in_steady = all_comm_time_df[num_warmup_microbatches:-num_warmup_microbatches]
         return fwdbwd_step_in_steady['idle_interval'].sum()/1000
     
@@ -202,7 +207,7 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
         if stage_id == self.pipeline_parallel_size-1:
             return 0.0
         else:
-            num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+            num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
             if len(all_comm_time_df) > num_warmup_microbatches * 2:
                 fwdbwd_step_in_cooldown = all_comm_time_df[-num_warmup_microbatches:]
                 return fwdbwd_step_in_cooldown['idle_interval'].sum()/1000
@@ -210,7 +215,7 @@ class MegatronPipelineParallel1F1BInterleavedEPOverlapGroupTrace(MegatronPipelin
                 return 0.0
         
     def calculate_bubble_time_cooldown(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches_epoverlap(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         bwd_step_in_cooldown = all_comm_time_df[-num_warmup_microbatches:]
         return bwd_step_in_cooldown['idle_interval'].sum()/1000
 

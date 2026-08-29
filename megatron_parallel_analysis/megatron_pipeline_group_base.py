@@ -571,7 +571,7 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
             logical_and_across_model_parallel_group_time = self.calculate_logical_and_across_model_parallel_group_time(sorted_trace_df)
             should_run_forward_backward_time = self.calculate_should_run_forward_backward_time(sorted_trace_df)
             #bubble_time_total = bubble_time_warmup + bubble_time_steady + bubble_time_cooldown # + bubble_time_final
-            comm_time_true  = self.calculate_true_comm(all_comm_time_df)
+            comm_time_true = self.calculate_true_comm(all_comm_time_df)
             overhead_wait_time_total = theoretical_bubble_time_warmup + bubble_time_warmup + theoretical_bubble_time_steady + bubble_time_steady + theoretical_bubble_time_cooldown + bubble_time_cooldown
             comm_time_total =  comm_time_true + overhead_wait_time_total
 

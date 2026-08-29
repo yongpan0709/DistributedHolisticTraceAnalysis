@@ -141,11 +141,12 @@ class DistributedMegatronTraceAnalysis:
         pp: int, 
         cp: int = 1, 
         pp_schedule: str = '1f1b', 
-        vpp_size: int = 2, 
+        vpp_size: int = 2,
         micro_bs = 0,
         order: str = "tp-cp-ep-dp-pp",
         enable_ep_analysis: bool = False,
         rebuild_parse_cache: bool = False,
+        microbatch_group_size_per_vp_stage: Optional[int] = None,
     ):
         """
         Initialize the distributed trace analyzer.
@@ -159,6 +160,8 @@ class DistributedMegatronTraceAnalysis:
             cp: Context parallel size
             pp_schedule: Pipeline parallel schedule ('1f1b', '1f1b-interleaved', '1f1b-interleaved-epoverlap')
             vpp_size: Virtual pipeline parallel size
+            microbatch_group_size_per_vp_stage: Contiguous micro-batches per virtual pipeline stage;
+                defaults to the pipeline parallel size
             order: Rank generation order
         """
         self.trace_dir = trace_dir.rstrip('/')
@@ -180,6 +183,26 @@ class DistributedMegatronTraceAnalysis:
             assert self.vpp_size > 0, f'Invalid vpp size: {self.vpp_size}'
         else:
             self.vpp_size = None
+        if microbatch_group_size_per_vp_stage is None:
+            microbatch_group_size_per_vp_stage = pp
+        if microbatch_group_size_per_vp_stage <= 0:
+            raise ValueError(
+                'microbatch_group_size_per_vp_stage must be positive; '
+                f'got {microbatch_group_size_per_vp_stage}'
+            )
+        if pp_schedule in ['1f1b-interleaved', '1f1b-interleaved-epoverlap']:
+            if microbatch_group_size_per_vp_stage < pp:
+                raise ValueError(
+                    'microbatch_group_size_per_vp_stage must be at least PP size; '
+                    f'got group size={microbatch_group_size_per_vp_stage}, PP={pp}'
+                )
+            if micro_bs > 0 and microbatch_group_size_per_vp_stage > micro_bs:
+                raise ValueError(
+                    'microbatch_group_size_per_vp_stage cannot exceed the number '
+                    f'of micro-batches; got group size={microbatch_group_size_per_vp_stage}, '
+                    f'micro-batches={micro_bs}'
+                )
+        self.microbatch_group_size_per_vp_stage = microbatch_group_size_per_vp_stage
         self.micro_bs = micro_bs
         self.rebuild_parse_cache = rebuild_parse_cache
         self.comm = MPI.COMM_WORLD
@@ -393,6 +416,7 @@ class DistributedMegatronTraceAnalysis:
                 order=self.order,
                 vpp_size=self.vpp_size,
                 micro_bs = self.micro_bs,
+                microbatch_group_size_per_vp_stage=self.microbatch_group_size_per_vp_stage,
                 parse_cache_dir=self.parse_cache_dir,
                 rebuild_parse_cache=self.rebuild_parse_cache,
             )
@@ -408,6 +432,7 @@ class DistributedMegatronTraceAnalysis:
                 order=self.order,
                 vpp_size=self.vpp_size,
                 micro_bs = self.micro_bs,
+                microbatch_group_size_per_vp_stage=self.microbatch_group_size_per_vp_stage,
                 parse_cache_dir=self.parse_cache_dir,
                 rebuild_parse_cache=self.rebuild_parse_cache,
             )

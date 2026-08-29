@@ -30,10 +30,15 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         micro_bs = 0,
         parse_cache_dir: Optional[str] = None,
         rebuild_parse_cache: bool = False,
+        microbatch_group_size_per_vp_stage: Optional[int] = None,
         ) -> None:
         super().__init__(trace_files, trace_dir, dp, tp, pp, ep, cp, order, micro_bs, parse_cache_dir=parse_cache_dir, rebuild_parse_cache=rebuild_parse_cache)
         #self.pp_schedule = pp_schedule
         self.vpp_size = vpp_size
+        self.microbatch_group_size_per_vp_stage = (
+            pp if microbatch_group_size_per_vp_stage is None
+            else microbatch_group_size_per_vp_stage
+        )
 
     def preprocess_trace_df(self, rank):
         #trace_df = self.full_dfs[rank]
@@ -62,8 +67,8 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         trace_df['vpp_stage_id'] = 0
         trace_df['micro_batch_id'] = -1
         num_microbatches = self.get_num_microbatches()
-        num_warmup_microbatches = get_pp_rank_microbatches(num_microbatches, self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
-        schedule_table = get_schedule_table(num_microbatches, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches(num_microbatches, self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
+        schedule_table = get_schedule_table(num_microbatches, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         micro_batch_order, _ = zip(*schedule_table)
         fwd_order, bwd_order, _ = convert_schedule_table_to_order(num_warmup_microbatches, self.vpp_size, schedule_table)
         forward_mask = trace_df['s_name'].eq('forward_step')
@@ -295,7 +300,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             return all_comm_time_df.loc[theoretical_bubble_head_index, 'idle_interval'].sum()/1000
 
     def calculate_bubble_time_warmup(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         fwd_step_in_head = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^forward_step$')].index[:num_warmup_microbatches+1]
         return all_comm_time_df.loc[fwd_step_in_head, 'idle_interval'].sum()/1000
     
@@ -310,7 +315,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
                 return 0.0
 
     def calculate_bubble_time_steady(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         fwd_step = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^forward_step$')]
         fwd_step_in_steady = fwd_step.index[num_warmup_microbatches+1:]
         bwd_step = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^backward_step$')]
@@ -319,7 +324,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
     
     # Todo: update this function, since currently we cannot accurately get the idle interval because send-recv by mooncake. Also, cannot calculate the send ts of last send_backward_recv_backward
     def calculate_theoretical_bubble_time_cooldown(self, all_comm_time_df, all_backward_steps_df, stage_id, stage_0_optimizer_step_start_ts=None):
-        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         if stage_id == self.pipeline_parallel_size-1:
             theoretical_bubble_time = 0.0
         else:
@@ -350,7 +355,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
         return theoretical_bubble_time/1000
 
     def calculate_bubble_time_cooldown(self, all_comm_time_df, stage_id):
-        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.pipeline_parallel_size)
+        num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         bwd_index = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^backward_step$')].index
         bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches+(self.pipeline_parallel_size - stage_id - 1):]
         return all_comm_time_df.loc[bwd_step_in_cooldown, 'idle_interval'].sum()/1000
