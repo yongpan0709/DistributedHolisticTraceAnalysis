@@ -55,7 +55,7 @@ def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_
     profiler_step_count = int(profiler_step_mask.sum())
     pretrain_kernel_span = full_df.loc[pretrain_mask, 'kernel_span'].to_numpy()
     pretrain_count = len(pretrain_kernel_span)
-    result_df = full_df.loc[full_df["s_cat"].isin(["user_annotation", "gpu_memcpy"])].copy()
+    result_df = full_df.loc[full_df["s_cat"].isin(["user_annotation"])].copy()
     del main_stack
     del cg
     del t
@@ -496,16 +496,16 @@ class MegatronPipelineParallelGroupTraceBase(ABC):
     def combine_into_one_trace(traces_dict: dict):
         all_trace_dfs = []
         # Todo: debug performance issue, check if the memcpy names are correct
-        # memcpy_names = [
-        #     'Memcpy1 DtoH (Device -> Pinned)',
-        #     'Memcpy1 HtoD (Pinned -> Device)',
-        # ]
+        memcpy_names = [
+            # 'Memcpy1 DtoH (Device -> Pinned)',
+            'Memcpy1 HtoD (Pinned -> Device)',
+        ]
         for rank, trace_df in traces_dict.items():
             trace_df['rank'] = rank
             forward_step_df = trace_df.loc[trace_df['s_name'] == 'forward_step']
             if not forward_step_df.empty:
                 forward_step_pid = forward_step_df['pid'].iloc[0]
-                # trace_df.loc[trace_df['s_name'].isin(memcpy_names), 'pid'] = forward_step_pid
+                trace_df.loc[trace_df['s_name'].isin(memcpy_names), 'pid'] = forward_step_pid
             all_trace_dfs.append(trace_df)
         trace_df = pd.concat(all_trace_dfs, ignore_index=True)
         return trace_df
