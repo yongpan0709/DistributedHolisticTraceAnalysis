@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import re
 import time
 import tracemalloc
 from collections.abc import Generator
@@ -272,6 +273,30 @@ def _parse_trace_events_ijson_batched(
     return df
 
 
+_PYTHON_FUNCTION_FILTER_PATTERNS = (
+    r".*__init__.*",
+    r".*__enter__.*",
+    r".*__exit__.*",
+    r"torch/.*__call__.*",
+    r"transformer_engine/.*__call__.*",
+    r"triton/.*__call__.*",
+    r"<built-in .*>",
+)
+_PYTHON_FUNCTION_FILTER = re.compile(
+    "|".join(f"(?:{pattern})" for pattern in _PYTHON_FUNCTION_FILTER_PATTERNS)
+)
+
+
+def _drop_python_function_events(df: pd.DataFrame, cfg: ParserConfig) -> None:
+    if not cfg.drop_python_function_events or "name" not in df.columns:
+        return
+
+    mask = df["cat"].eq("python_function") & df["name"].astype("string").str.match(
+        _PYTHON_FUNCTION_FILTER, na=False
+    )
+    df.drop(df.index[mask], inplace=True)
+
+
 def _compress_df(
     df: pd.DataFrame, cfg: Optional[ParserConfig] = None
 ) -> Tuple[pd.DataFrame, TraceSymbolTable]:
@@ -303,6 +328,7 @@ def _compress_df(
 
     # drop rows with null values
     df.dropna(axis=0, subset=["cat"], inplace=True)
+    _drop_python_function_events(df, cfg)
     df.drop(df[df["cat"] == "Trace"].index, inplace=True)
     if cfg.drop_gpu_user_annotation:
         df.drop(df[df["cat"] == "gpu_user_annotation"].index, inplace=True)

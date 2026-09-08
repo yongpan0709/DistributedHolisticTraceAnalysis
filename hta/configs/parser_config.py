@@ -53,6 +53,9 @@ class ParserConfig:
         See supported modes for in the enum ParserBackend.
         Note: Use ParserBackend.IJSON_BATCH_AND_COMPRESS for best results.
         Please see https://github.com/facebookresearch/HolisticTraceAnalysis/pull/125
+    +drop_python_function_events (bool): Drops selected Python-function events that
+        commonly overlap user annotations and cannot be represented by a single call stack.
+        This is off by default.
 
     This class can be extended to support other customizations.
     """
@@ -104,6 +107,7 @@ class ParserConfig:
 
         self.min_required_cols: List[str] = self.DEFAULT_MIN_REQUIRED_COLS
         self.drop_gpu_user_annotation: bool = True
+        self.drop_python_function_events: bool = False
         self.version: YamlVersion = version
         self.parse_all_args: bool = parse_all_args
         self.selected_arg_keys: Optional[List[str]] = None
@@ -121,7 +125,7 @@ class ParserConfig:
     def clone(self) -> "ParserConfig":
         return copy.deepcopy(self)
 
-    def get_fingerprint_key(self) -> tuple[tuple[str, ...], bool]:
+    def get_fingerprint_key(self) -> tuple[tuple[str, ...], bool, bool]:
         """Return a hashable key representing the config for caching.
 
         Captures only fields that affect parsing output:
@@ -132,7 +136,7 @@ class ParserConfig:
             A tuple of (sorted_arg_names, parse_all_args) suitable for hashing.
         """
         args_names = tuple(sorted(a.name for a in self.get_args()))
-        return (args_names, self.parse_all_args)
+        return (args_names, self.parse_all_args, self.drop_python_function_events)
 
     def __repr__(self) -> str:
         """Return a human-readable representation of the ParserConfig."""
@@ -159,6 +163,9 @@ class ParserConfig:
         _DEFAULT_PARSER_CONFIG.set_min_required_cols(cfg.get_min_required_cols())
         _DEFAULT_PARSER_CONFIG.set_drop_gpu_user_annotation(
             cfg.drop_gpu_user_annotation
+        )
+        _DEFAULT_PARSER_CONFIG.set_drop_python_function_events(
+            cfg.drop_python_function_events
         )
         _DEFAULT_PARSER_CONFIG.set_trace_memory(cfg.trace_memory)
         _DEFAULT_PARSER_CONFIG.set_parser_backend(cfg.parser_backend)
@@ -215,6 +222,9 @@ class ParserConfig:
 
     def set_drop_gpu_user_annotation(self, should_drop: bool) -> None:
         self.drop_gpu_user_annotation = should_drop
+
+    def set_drop_python_function_events(self, should_drop: bool) -> None:
+        self.drop_python_function_events = should_drop
 
     def set_parser_backend(self, parser_backend: Optional[ParserBackend]) -> None:
         self.parser_backend = parser_backend
