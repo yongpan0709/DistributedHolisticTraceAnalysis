@@ -392,16 +392,30 @@ def download_and_extract_dataset(
             if members:
                 # Extract all files
                 tar.extractall(path=target_dir)
-                
+
                 # Find the extracted directory name
                 top_level_dir = members[0].name.split('/')[0]
                 original_extracted_path = os.path.join(target_dir, top_level_dir)
-                
-                # Rename to match expected dataset name if different
+
+                # Rename a top-level directory to match the expected dataset
+                # name. Some archives contain rank files directly at the
+                # archive root; in that case, collect the extracted entries
+                # into the expected directory instead of moving one file to it.
                 if original_extracted_path != extracted_dir:
-                    if os.path.exists(extracted_dir):
-                        shutil.rmtree(extracted_dir)
-                    shutil.move(original_extracted_path, extracted_dir)
+                    if os.path.isdir(original_extracted_path):
+                        if os.path.exists(extracted_dir):
+                            shutil.rmtree(extracted_dir)
+                        shutil.move(original_extracted_path, extracted_dir)
+                    elif not os.path.exists(extracted_dir):
+                        os.makedirs(extracted_dir)
+                        top_level_entries = {
+                            member.name.split('/')[0] for member in members
+                            if member.name and '/' not in member.name
+                        }
+                        for entry in top_level_entries:
+                            entry_path = os.path.join(target_dir, entry)
+                            if os.path.exists(entry_path):
+                                shutil.move(entry_path, os.path.join(extracted_dir, entry))
         
         # Clean up the tar file
         os.remove(tar_path)
