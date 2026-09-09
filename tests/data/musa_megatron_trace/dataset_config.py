@@ -91,7 +91,8 @@ MEGATRON_PIPELINE_TEST_DATASETS: Dict[str, Dict] = {
         "dp_size": 8,
         "ep_size": 8,
         "vpp_size": 2,
-        "micro_batchsize": 64,
+        "micro_batchsize": 20,
+        "microbatch_group_size_per_vp_stage": 20,
         "description": "Megatron pipeline trace with 1f1b-interleaved schedule (TP=1, PP=3, DP=8, EP=8, VPP=2)",
     },
     # Future datasets will be added here:

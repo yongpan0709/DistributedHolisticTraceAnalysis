@@ -160,6 +160,9 @@ class TestMegatronPipeline(unittest.TestCase):
             pp=dataset_info['pp_size'],
             pp_schedule=dataset_info['schedule'],
             micro_bs=dataset_info['micro_batchsize'],
+            microbatch_group_size_per_vp_stage=dataset_info.get(
+                'microbatch_group_size_per_vp_stage'
+            ),
         )
         if dataset_info['vpp_size'] is not None:
             analysis_kwargs['vpp_size'] = dataset_info['vpp_size']
