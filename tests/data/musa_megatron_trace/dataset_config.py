@@ -23,7 +23,7 @@ BASE_URL = "https://sh-repo.mthreads.com/repo/repository/mcc-ci-dependency/hta"
 # Test dataset filenames (tgz files)
 DATASET_FILES: Dict[str, str] = {
     "1f1b": "mccl-1f1b-tp1-pp4-dp2-ep8.tgz",
-    "1f1b-interleaved": "mooncake-tp1-pp32-dp32-ep8-vpp2.tgz",
+    "1f1b-interleaved": "mooncake-tp1-pp3-dp8-ep8-vpp2.tgz",
     # Future datasets will be added here:
     # "1f1b-interleaved-epoverlap": "...tgz",
 }
@@ -32,7 +32,7 @@ DATASET_FILES: Dict[str, str] = {
 # Expected CSV filenames for each dataset
 EXPECTED_CSV_NAMES: Dict[str, str] = {
     "1f1b": "mccl-1f1b-tp1-pp4-dp2-ep8-expected_report-pp0-detail.csv",
-    "1f1b-interleaved": "mooncake-tp1-pp32-dp32-ep8-vpp2-expected_report-pp1-detail.csv",
+    "1f1b-interleaved": "mooncake-tp1-pp3-dp8-ep8-vpp2-expected_report-pp0-detail.csv",
     # Future datasets will be added here:
     # "1f1b-interleaved-epoverlap": "...expected_report-pp0.csv",
 }
@@ -87,12 +87,12 @@ MEGATRON_PIPELINE_TEST_DATASETS: Dict[str, Dict] = {
     "1f1b-interleaved": {
         "schedule": "1f1b-interleaved",
         "tp_size": 1,
-        "pp_size": 32,
-        "dp_size": 32,
+        "pp_size": 3,
+        "dp_size": 8,
         "ep_size": 8,
         "vpp_size": 2,
         "micro_batchsize": 64,
-        "description": "Megatron pipeline trace with 1f1b-interleaved schedule (TP=1, PP=32, DP=32, EP=8, VPP=2)",
+        "description": "Megatron pipeline trace with 1f1b-interleaved schedule (TP=1, PP=3, DP=8, EP=8, VPP=2)",
     },
     # Future datasets will be added here:
     # "1f1b-interleaved-epoverlap": {

@@ -217,13 +217,13 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             'logical_and_across_model_parallel_group',
             'reduce_max_stat_across_model_parallel_group',
             'should_run_forward_backward',
-            r'enumerate(DataLoader)#_MultiProcessingDataLoaderIter.__next__',
             # 'mccl:reduce_scatter_tensor_coalesced',
             # For debug
             # 'mccl:all_reduce',
             # 'mccl:all_to_all',
             # 'Memcpy1 DtoH (Device -> Pinned)',
-            'Memcpy1 HtoD (Pinned -> Device)'
+            # 'Memcpy1 HtoD (Pinned -> Device)'
+            # r'enumerate(DataLoader)#_MultiProcessingDataLoaderIter.__next__',
         ]
         filter_comm = NameFilter(create_regex_for_full_match(comm_names_list))
         return filter_comm(trace_df)
@@ -333,7 +333,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
             if len(bwd_index) > 0:
                 bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches:]
                 theoretical_bubble_time = all_comm_time_df.loc[
-                    bwd_step_in_cooldown[:self.pipeline_parallel_size-stage_id-1], 'idle_interval'
+                    bwd_step_in_cooldown[:(self.pipeline_parallel_size-stage_id-1)*self.vpp_size], 'idle_interval'
                 ].sum()
             else:
                 theoretical_bubble_time = 0.0
@@ -358,7 +358,7 @@ class MegatronPipelineParallel1F1BInterleavedGroupTrace(MegatronPipelineParallel
     def calculate_bubble_time_cooldown(self, all_comm_time_df, stage_id):
         num_warmup_microbatches = get_pp_rank_microbatches(self.get_num_microbatches(), self.pipeline_parallel_size, stage_id, self.vpp_size, self.microbatch_group_size_per_vp_stage)
         bwd_index = all_comm_time_df[all_comm_time_df['s_name'].str.match(pat=r'^backward_step$')].index
-        bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches+(self.pipeline_parallel_size - stage_id - 1):]
+        bwd_step_in_cooldown = bwd_index[-num_warmup_microbatches+(self.pipeline_parallel_size - stage_id - 1)*self.vpp_size:]
         return all_comm_time_df.loc[bwd_step_in_cooldown, 'idle_interval'].sum()/1000
 
     # Todo: using mooncake, cannot get the accurate comm time and wait time

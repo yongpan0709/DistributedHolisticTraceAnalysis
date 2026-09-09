@@ -197,7 +197,7 @@ class TestMegatronPipeline(unittest.TestCase):
         self._run_analysis_and_compare('1f1b')
 
     def test_1f1b_interleaved_analysis_results(self):
-        self._run_analysis_and_compare('1f1b-interleaved', pp_group_id=1)
+        self._run_analysis_and_compare('1f1b-interleaved', pp_group_id=0)
 
 
 if __name__ == '__main__':
