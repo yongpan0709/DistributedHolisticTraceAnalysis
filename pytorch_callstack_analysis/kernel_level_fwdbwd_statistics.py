@@ -200,6 +200,7 @@ def main():
 
     cfg = ParserConfig.get_default_cfg()
     cfg.add_args(ParserConfig.ARGS_INPUT_SHAPE)
+    cfg.set_drop_python_function_events(True)
     ParserConfig.set_default_cfg(cfg)
 
     trace_files = get_trace_files(trace_dir)
