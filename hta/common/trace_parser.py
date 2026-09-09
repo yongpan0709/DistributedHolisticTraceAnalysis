@@ -281,6 +281,8 @@ _PYTHON_FUNCTION_FILTER_PATTERNS = (
     r"transformer_engine/.*__call__.*",
     r"triton/.*__call__.*",
     r"<built-in .*>",
+    r"musaEventQuery",
+    r"musaStreamIsCapturing",
 )
 _PYTHON_FUNCTION_FILTER = re.compile(
     "|".join(f"(?:{pattern})" for pattern in _PYTHON_FUNCTION_FILTER_PATTERNS)

@@ -16,6 +16,7 @@ from hta.common.trace import Trace
 from hta.common.trace_filter import NameFilter
 from megatron_parallel_analysis.utils.trace_filter_utils import create_regex_for_prefix_match
 from hta.configs.config import logger
+from hta.configs.parser_config import ParserConfig
 from hta.configs.default_values import DEFAULT_TRACE_DIR
 from hta.common.trace_call_graph import CallGraph
 from hta.common.trace_file import get_trace_files
@@ -41,6 +42,9 @@ def get_trace_workname(trace_dir: str) -> str:
 
 def parallel_callgraph_create(rank_id, trace_file, bwd_annotation_str='backward_step'):
     logger.debug(f'rank id: {rank_id}, trace_file: {trace_file}')
+    cfg = ParserConfig.get_default_cfg()
+    cfg.set_drop_python_function_events(True)
+    ParserConfig.set_default_cfg(cfg)
     t = Trace(trace_files={rank_id: trace_file}, trace_dir="")
     t.load_traces()
     t.decode_symbol_ids(use_shorten_name=False)
