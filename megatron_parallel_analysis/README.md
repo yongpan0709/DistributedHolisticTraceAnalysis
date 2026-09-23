@@ -31,7 +31,6 @@ megatron_parallel_analysis/
 ├── install_hta.sh
 ├── distribute_trace_analysis.py
 ├── run_distributed_megatron_trace_analysis.py
-├── trace_etl.py
 ├── megatron_pipeline_group_base.py
 ├── megatron_pipeline_group_1f1b.py
 ├── megatron_pipeline_group_1f1b_interleaved.py
@@ -50,7 +49,6 @@ The main modules are:
 
 - `distribute_trace_analysis.py`: orchestrates MPI-distributed analysis tasks for PP groups and complete EP groups, and generates PP/EP analysis results.
 - `run_distributed_megatron_trace_analysis.py`: command-line entrypoint for PP/EP trace analysis.
-- `trace_etl.py`: parallel raw-trace cleaning entrypoint.
 - `megatron_pipeline_group_base.py`: pipeline-group analysis base class providing shared trace parsing, communication filtering, P2P linking, and report generation.
 - `megatron_pipeline_group_1f1b.py`: regular 1F1B analysis and rank-level forward/backward GPU timeline extraction.
 - `megatron_pipeline_group_1f1b_interleaved.py`: interleaved 1F1B analysis and VPP GPU timeline extraction.
@@ -120,33 +118,6 @@ mpirun -allow-run-as-root -np 16 --bind-to none \
   --wdir /path/to/HolisticTraceAnalysis \
   ...
 ```
-
-### ETL data cleaning
-
-`trace_etl.py` is used for trace pre-processing. It filters noisy events from raw traces and writes the cleaned traces into a sibling `<trace-dir>-etl` directory.
-
-Single-process example:
-
-```bash
-python -m megatron_parallel_analysis.trace_etl \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 4 \
-  --dp 2 \
-  --ep 8
-```
-
-```bash
-mpirun -allow-run-as-root -np 2 --bind-to none \
-  --hostfile ./hostfile \
-  --map-by ppr:1:node \
-  --wdir /path/to/HolisticTraceAnalysis \
-  python -m megatron_parallel_analysis.trace_etl \
-    --trace-dir /path/to/trace-dir \
-    --tp 1 --pp 4 --dp 2 --ep 8
-```
-
-Do not run `python megatron_parallel_analysis/trace_etl.py` directly. The file uses package imports and should be started with `python -m megatron_parallel_analysis.trace_etl` from the repository root or an environment where the package is importable.
 
 ### Pipeline Parallel Group analysis
 
@@ -419,10 +390,6 @@ python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
   --vpp 2 \
   --pp-schedule 1f1b-interleaved
 ```
-
-### `trace_etl.py`
-
-ETL data-cleaning command-line entrypoint. See the “ETL data cleaning” section above.
 
 ### Pipeline group analyzers
 

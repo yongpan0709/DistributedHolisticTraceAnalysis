@@ -30,7 +30,6 @@ megatron_parallel_analysis/
 ├── install_hta.sh
 ├── distribute_trace_analysis.py
 ├── run_distributed_megatron_trace_analysis.py
-├── trace_etl.py
 ├── megatron_pipeline_group_base.py
 ├── megatron_pipeline_group_1f1b.py
 ├── megatron_pipeline_group_1f1b_interleaved.py
@@ -49,7 +48,6 @@ megatron_parallel_analysis/
 
 - `distribute_trace_analysis.py`：编排 PP group 和完整 EP group 的 MPI 分布式分析任务，并生成 PP/EP 分析结果。
 - `run_distributed_megatron_trace_analysis.py`：PP/EP trace 分析的命令行入口。
-- `trace_etl.py`：原始 trace 的并行清洗入口。
 - `megatron_pipeline_group_base.py`：pipeline group 分析基类，提供 trace 解析、通信过滤、P2P 关联和报告生成等通用能力。
 - `megatron_pipeline_group_1f1b.py`：普通 1F1B 调度分析及 rank 级 forward/backward GPU timeline 提取。
 - `megatron_pipeline_group_1f1b_interleaved.py`：interleaved 1F1B 调度分析及 VPP GPU timeline 提取。
@@ -119,33 +117,6 @@ mpirun -allow-run-as-root -np 16 --bind-to none \
   --wdir /path/to/HolisticTraceAnalysis \
   ...
 ```
-
-### ETL 数据清洗
-
-`trace_etl.py` 用于 trace 预处理，会先过滤原始 trace 中的噪声事件，将清洗后的 trace 输出到同级的 `<trace-dir>-etl` 目录。
-
-单机运行示例：
-
-```bash
-python -m megatron_parallel_analysis.trace_etl \
-  --trace-dir /path/to/trace-dir \
-  --tp 1 \
-  --pp 4 \
-  --dp 2 \
-  --ep 8
-```
-
-```bash
-mpirun -allow-run-as-root -np 2 --bind-to none \
-  --hostfile ./hostfile \
-  --map-by ppr:1:node \
-  --wdir /path/to/HolisticTraceAnalysis \
-  python -m megatron_parallel_analysis.trace_etl \
-    --trace-dir /path/to/trace-dir \
-    --tp 1 --pp 4 --dp 2 --ep 8
-```
-
-不要直接执行 `python megatron_parallel_analysis/trace_etl.py`。该文件使用了包导入，应该在仓库根目录下或已可导入该包的环境中，通过 `python -m megatron_parallel_analysis.trace_etl` 启动。
 
 ### Pipeline Parallel Group 分析
 
@@ -411,10 +382,6 @@ python -m megatron_parallel_analysis.run_distributed_megatron_trace_analysis \
   --vpp 2 \
   --pp-schedule 1f1b-interleaved
 ```
-
-### `trace_etl.py`
-
-ETL 数据清洗命令行入口，详见上文“ETL 数据清洗”。
 
 ### Pipeline group 分析类
 
